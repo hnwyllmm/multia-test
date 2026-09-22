@@ -26,6 +26,7 @@
 
 # Fortran module files
 *.mod
+!go.mod
 *.smod
 
 # Compiled Static libraries
@@ -67,3 +68,10 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Dispatcher runtime data and secrets
+/multica-github-dispatcher
+state.db
+state.db-*
+dispatcher.env
+config.yaml
