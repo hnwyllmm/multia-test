@@ -1,0 +1,17 @@
+[Unit]
+Description=AntMultica GitHub review dispatcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/data/wangyunlai.wyl/multica-github-dispatcher
+EnvironmentFile=/data/wangyunlai.wyl/multica-github-dispatcher/dispatcher.env
+ExecStart=/data/wangyunlai.wyl/multica-github-dispatcher/bin/multica-github-dispatcher run --config /data/wangyunlai.wyl/multica-github-dispatcher/config.yaml
+Restart=always
+RestartSec=10s
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

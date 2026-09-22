@@ -1,0 +1,33 @@
+poll_interval: 60s
+bootstrap_lookback: 24h
+
+github:
+  auth:
+    type: env
+    name: GITHUB_TOKEN
+  proxy:
+    type: url_env
+    name: GITHUB_PROXY_URL
+    required: true
+    connect_timeout: 10s
+    request_timeout: 30s
+
+multica:
+  server_url_env: MULTICA_SERVER_URL
+  workspace_id: a6cee5b0-f694-4978-97ce-f15b26b2a6af
+  workspace_prefix: WANG
+  auth:
+    type: env
+    name: MULTICA_TOKEN
+
+repositories:
+  - github: hnwyllmm/multia-test
+    reviewer_squad_id: REPLACE_WITH_PR_REVIEWERS_SQUAD_ID
+    reviewer_count: 1
+    review_engine: ocr_delegate
+    ocr_version: "1.12.8"
+    fix_marker: "multica:fix"
+    process_changes_requested: true
+    trust_mode: any
+
+state_db: /data/wangyunlai.wyl/multica-github-dispatcher/state.db
