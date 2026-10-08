@@ -94,9 +94,14 @@ multica:
   workspace_id: workspace
   workspace_prefix: WANG
   auth: {type: env, name: MULTICA_TOKEN}
+review_dispatch:
+  agents:
+    - id: reviewer
+      name: Reviewer
+      webhook: {type: env, name: REVIEWER_WEBHOOK_URL}
 repositories:
   - github: owner/repo
-    reviewer_squad_id: squad
+    reviewer_ids: [reviewer]
     reviewer_count: 1
     ocr_version: 1.12.8
 state_db: /tmp/state.db
@@ -158,9 +163,15 @@ multica:
   workspace_id: workspace
   workspace_prefix: WANG
   auth: {type: env, name: MULTICA_TOKEN}
+review_dispatch:
+  request_timeout: 30s
+  agents:
+    - id: reviewer
+      name: Reviewer
+      webhook: {type: env, name: REVIEWER_WEBHOOK_URL}
 ` + dashboard + `repositories:
   - github: owner/repo
-    reviewer_squad_id: squad
+    reviewer_ids: [reviewer]
     reviewer_count: 1
     ocr_version: 1.12.8
 state_db: /tmp/state.db

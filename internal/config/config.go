@@ -121,15 +121,26 @@ type DashboardConfig struct {
 	RefreshInterval Duration `yaml:"refresh_interval"`
 }
 
+type ReviewAgent struct {
+	ID      string    `yaml:"id"`
+	Name    string    `yaml:"name"`
+	Webhook SecretRef `yaml:"webhook"`
+}
+
+type ReviewDispatchConfig struct {
+	RequestTimeout Duration      `yaml:"request_timeout"`
+	Agents         []ReviewAgent `yaml:"agents"`
+}
+
 type Repository struct {
-	GitHub                  string `yaml:"github"`
-	ReviewerSquadID         string `yaml:"reviewer_squad_id"`
-	ReviewerCount           int    `yaml:"reviewer_count"`
-	ReviewEngine            string `yaml:"review_engine"`
-	OCRVersion              string `yaml:"ocr_version"`
-	FixMarker               string `yaml:"fix_marker"`
-	ProcessChangesRequested bool   `yaml:"process_changes_requested"`
-	TrustMode               string `yaml:"trust_mode"`
+	GitHub                  string   `yaml:"github"`
+	ReviewerIDs             []string `yaml:"reviewer_ids"`
+	ReviewerCount           int      `yaml:"reviewer_count"`
+	ReviewEngine            string   `yaml:"review_engine"`
+	OCRVersion              string   `yaml:"ocr_version"`
+	FindingMarker           string   `yaml:"finding_marker"`
+	ProcessChangesRequested bool     `yaml:"process_changes_requested"`
+	TrustMode               string   `yaml:"trust_mode"`
 }
 
 func (r Repository) OwnerRepo() (string, string, error) {
@@ -141,13 +152,14 @@ func (r Repository) OwnerRepo() (string, string, error) {
 }
 
 type Config struct {
-	PollInterval      Duration        `yaml:"poll_interval"`
-	BootstrapLookback Duration        `yaml:"bootstrap_lookback"`
-	GitHub            GitHubConfig    `yaml:"github"`
-	Multica           MulticaConfig   `yaml:"multica"`
-	Dashboard         DashboardConfig `yaml:"dashboard"`
-	Repositories      []Repository    `yaml:"repositories"`
-	StateDB           string          `yaml:"state_db"`
+	PollInterval      Duration             `yaml:"poll_interval"`
+	BootstrapLookback Duration             `yaml:"bootstrap_lookback"`
+	GitHub            GitHubConfig         `yaml:"github"`
+	Multica           MulticaConfig        `yaml:"multica"`
+	ReviewDispatch    ReviewDispatchConfig `yaml:"review_dispatch"`
+	Dashboard         DashboardConfig      `yaml:"dashboard"`
+	Repositories      []Repository         `yaml:"repositories"`
+	StateDB           string               `yaml:"state_db"`
 }
 
 func Load(path string) (*Config, error) {
@@ -210,6 +222,31 @@ func (c *Config) setDefaultsAndValidate() error {
 	if err := c.Multica.Auth.Validate("multica.auth"); err != nil {
 		return err
 	}
+	if c.ReviewDispatch.RequestTimeout.Duration == 0 {
+		c.ReviewDispatch.RequestTimeout.Duration = 30 * time.Second
+	}
+	if len(c.ReviewDispatch.Agents) == 0 {
+		return errors.New("review_dispatch.agents must contain at least one reviewer")
+	}
+	reviewAgents := make(map[string]struct{}, len(c.ReviewDispatch.Agents))
+	for i := range c.ReviewDispatch.Agents {
+		agent := &c.ReviewDispatch.Agents[i]
+		agent.ID = strings.TrimSpace(agent.ID)
+		agent.Name = strings.TrimSpace(agent.Name)
+		if agent.ID == "" {
+			return fmt.Errorf("review_dispatch.agents[%d].id is required", i)
+		}
+		if _, duplicate := reviewAgents[agent.ID]; duplicate {
+			return fmt.Errorf("duplicate review agent %s", agent.ID)
+		}
+		if agent.Name == "" {
+			agent.Name = agent.ID
+		}
+		if err := agent.Webhook.Validate(fmt.Sprintf("review_dispatch.agents[%d].webhook", i)); err != nil {
+			return err
+		}
+		reviewAgents[agent.ID] = struct{}{}
+	}
 	if c.Dashboard.Listen == "" {
 		c.Dashboard.Listen = "127.0.0.1:8787"
 	}
@@ -234,8 +271,20 @@ func (c *Config) setDefaultsAndValidate() error {
 			return fmt.Errorf("duplicate repository %s", r.GitHub)
 		}
 		seen[key] = struct{}{}
-		if r.ReviewerSquadID == "" {
-			return fmt.Errorf("repository %s reviewer_squad_id is required", r.GitHub)
+		if len(r.ReviewerIDs) == 0 {
+			for _, agent := range c.ReviewDispatch.Agents {
+				r.ReviewerIDs = append(r.ReviewerIDs, agent.ID)
+			}
+		}
+		repoReviewers := map[string]struct{}{}
+		for _, reviewerID := range r.ReviewerIDs {
+			if _, found := reviewAgents[reviewerID]; !found {
+				return fmt.Errorf("repository %s reviewer %s is not configured in review_dispatch.agents", r.GitHub, reviewerID)
+			}
+			if _, duplicate := repoReviewers[reviewerID]; duplicate {
+				return fmt.Errorf("repository %s has duplicate reviewer %s", r.GitHub, reviewerID)
+			}
+			repoReviewers[reviewerID] = struct{}{}
 		}
 		if r.ReviewerCount <= 0 {
 			r.ReviewerCount = 1
@@ -249,8 +298,11 @@ func (c *Config) setDefaultsAndValidate() error {
 		if r.OCRVersion == "" {
 			return fmt.Errorf("repository %s ocr_version is required", r.GitHub)
 		}
-		if r.FixMarker == "" {
-			r.FixMarker = "multica:fix"
+		if r.FindingMarker == "" {
+			r.FindingMarker = "automated-review-finding:v1"
+		}
+		if !regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]*$`).MatchString(r.FindingMarker) {
+			return fmt.Errorf("repository %s finding_marker is invalid", r.GitHub)
 		}
 		if r.TrustMode == "" {
 			r.TrustMode = "any"
@@ -266,6 +318,15 @@ func (c *Config) setDefaultsAndValidate() error {
 		return errors.New("state_db must be an absolute path")
 	}
 	return nil
+}
+
+func (c *Config) ReviewAgent(id string) (ReviewAgent, bool) {
+	for _, agent := range c.ReviewDispatch.Agents {
+		if agent.ID == id {
+			return agent, true
+		}
+	}
+	return ReviewAgent{}, false
 }
 
 func validateProxy(p ProxyConfig) error {

@@ -1,23 +1,26 @@
 # multica-github-dispatcher
 
-`multica-github-dispatcher` connects GitHub pull requests to an AntMultica
-workspace without an inbound webhook.
+`multica-github-dispatcher` discovers GitHub pull requests independently of
+Multica issues and starts reviewer Agents through `run_only` Autopilot
+webhooks. A Multica issue is optional context, not a prerequisite for review.
 
 It runs two independent polling lanes:
 
 1. A new open PR, or a new head SHA on an existing PR, creates one review
-   round. The PR title must start with `[WANG-N]`. Reviewers are selected
-   deterministically from the configured Multica squad and mentioned on the
-   existing Multica issue. A clean review is recorded only on the Multica
-   issue; it does not create a GitHub review or comment.
-2. A GitHub inline review comment whose first non-empty line starts with
-   `multica:fix`, or a `CHANGES_REQUESTED` review, mentions the issue's current
-   assignee. This lane does not depend on the PR having been dispatched for
-   review by this service.
+   round. Reviewers are selected deterministically from the repository's
+   configured reviewer IDs and invoked through their webhook. If the PR title
+   or body contains a key such as `WANG-2`, the dispatcher fetches that issue
+   and adds its context to the review payload. A clean review creates no GitHub
+   or Multica comment.
+2. An actionable inline finding carries a hidden
+   `automated-review-finding:v1` HTML marker while keeping ordinary visible
+   review text. If the PR has an associated active Multica issue, that finding
+   or a `CHANGES_REQUESTED` review mentions the issue's current assignee.
 
-The dispatcher never exposes an HTTP port. GitHub is read through its REST API;
-Multica writes are performed by the `multica` CLI. An optional read-only
-dashboard is a separate process with a configurable listener.
+The dispatcher never exposes an inbound event port. GitHub is read through its
+REST API, reviewer webhooks are outbound HTTP(S) requests, and optional Multica
+context/feedback operations use the `multica` CLI. A read-only dashboard is a
+separate process with a configurable listener.
 
 ## Build and test
 
@@ -31,9 +34,9 @@ go build -o multica-github-dispatcher ./cmd/multica-github-dispatcher
 
 ## Configuration
 
-Copy [`deploy/config.example.yaml`](deploy/config.example.yaml) and set the
-workspace, repository, and reviewer squad IDs. Secrets are references, not
-literal YAML values.
+Copy [`deploy/config.example.yaml`](deploy/config.example.yaml), configure the
+repositories and reviewer IDs, and map every reviewer to a secret-backed
+Autopilot webhook URL. Secrets are references, not literal YAML values.
 
 The GitHub proxy is entirely user supplied. The dispatcher does not create or
 modify a proxy:
@@ -50,9 +53,11 @@ The GitHub client has its own transport. Every Multica CLI child explicitly
 removes standard proxy variables, so the GitHub route cannot accidentally be
 used for `antmultica.alipay.com`.
 
-The service validates `GET /rate_limit` through the selected route and validates
-the Multica workspace before migrating SQLite or polling. GitHub failures do
-not advance cursors.
+The service validates `GET /rate_limit` through the selected route and resolves
+all reviewer webhook secrets before migrating SQLite or polling. Multica
+workspace validation is optional: a failure removes issue context and feedback
+routing for that cycle but does not stop independent PR review. GitHub failures
+do not advance cursors.
 
 ## Credentials
 
@@ -64,6 +69,11 @@ their own existing `gh` authentication to publish reviews.
 Multica supports either an environment variable or a token file. A token file
 must be a regular file with mode `0600` or stricter and is read before every CLI
 call, so an atomic replacement rotates it without restarting the service.
+
+Each `run_only` Autopilot webhook URL is an opaque credential. Store it through
+an environment or mode-`0600` file reference. The URL is resolved on every
+delivery, never written to SQLite, and redacted from network errors. Webhook
+requests bypass GitHub proxy settings.
 
 Create a private environment file from
 [`deploy/dispatcher.env.example`](deploy/dispatcher.env.example), then set mode
@@ -79,8 +89,9 @@ multica-github-dispatcher dashboard --config /path/to/config.yaml
 multica-github-dispatcher status --config /path/to/config.yaml
 ```
 
-`--dry-run` performs live GitHub and Multica startup checks and discovery, but
-uses an in-memory state database and sends no Multica comments.
+`--dry-run` performs live GitHub and reviewer configuration checks and
+discovery, but uses an in-memory state database and sends no reviewer webhook
+or Multica comment.
 
 ## State and idempotency
 
@@ -88,19 +99,21 @@ SQLite runs in WAL mode. A review round is keyed by
 `owner/repo + PR number + head SHA`. GitHub feedback is keyed by `comment.id`
 or `review.id`, so editing a previously processed comment does not re-trigger
 work. A five-minute overlap on the per-repository review-comment cursor avoids
-boundary loss. Multica comments carry HTML markers; the outbox checks those
-markers before retries to prevent duplicate mentions after an ambiguous write.
+boundary loss. Review webhook requests carry the round event key in both JSON
+and the `Idempotency-Key` header. Multica feedback comments carry HTML markers;
+the outbox checks those markers before retries to prevent duplicate mentions
+after an ambiguous write.
 
 ## Read-only dashboard
 
 The dashboard shows repository and PR review rounds, linked Multica issues,
-GitHub feedback, delivery retries, cursors, recent poll health, and the latest
-runtime readiness check for each selectable reviewer. It reads SQLite directly
+GitHub feedback, delivery retries, cursors, recent poll health, and webhook
+configuration status for each selectable reviewer. It reads SQLite directly
 and does not require GitHub or Multica credentials.
 Set `multica.workspace_url` to the public workspace URL so issue identifiers in
 the review-round table link to their Multica issue pages. Reviewer display names
-are recovered from the persisted dispatch mentions; UUIDs remain available only
-as hover text for diagnostics.
+come from `review_dispatch.agents`; UUIDs remain available only as hover text
+for diagnostics. PRs without an associated issue show `未关联`.
 
 The listener defaults to `127.0.0.1:8787`. Set it to `0.0.0.0:8787` to expose
 the dashboard on every dev-host IPv4 interface, then open
@@ -129,12 +142,10 @@ codex plugin add open-code-review-codex@open-code-review --json
 ```
 
 Only agents that have passed a local `ocr --version`, delegate preview, and
-Codex plugin readiness check should be added to the configured review squad.
-Before every new review round, the dispatcher also reads Multica runtime status
-and selects only non-leader reviewer agents whose bound runtime is currently
-`online`. An offline, missing, or unbound runtime defers the PR without creating
-a misleading review round. The latest decision is persisted for the dashboard.
-Reviewer and worker instruction templates are in
+Codex plugin readiness check should be added to `review_dispatch.agents` and to
+a repository's `reviewer_ids`. Autopilot owns runtime execution; the dispatcher
+does not create or comment on a Multica issue to start review. Reviewer and
+worker instruction templates are in
 [`deploy/agent-instructions`](deploy/agent-instructions).
 
 ## Deployment

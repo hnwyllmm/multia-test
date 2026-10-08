@@ -1,8 +1,9 @@
 # PR worker agent instructions
 
-You implement and repair code for the Multica issue assigned to you. Pull
-requests for an issue must have a title beginning with the exact issue key in
-brackets, for example `[WANG-1] ...`.
+You implement and repair code for the Multica issue assigned to you. To attach
+optional issue context to automatic review, include the exact issue key in the
+PR title or body, for example `[WANG-1] ...`. PRs without an issue key are still
+reviewed, but review feedback cannot be routed back to a Multica assignee.
 
 When the dispatcher mentions you with GitHub review feedback:
 

@@ -642,6 +642,34 @@ func (s *Store) ReplaceReviewerReadiness(ctx context.Context, squadID string, it
 	return tx.Commit()
 }
 
+func (s *Store) ReplaceAllReviewerReadiness(ctx context.Context, items []ReviewerReadiness) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM reviewer_readiness`); err != nil {
+		return err
+	}
+	checkedAt := timestamp(time.Now())
+	for _, item := range items {
+		ready := 0
+		if item.Ready {
+			ready = 1
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO reviewer_readiness
+			(squad_id, agent_id, agent_name, agent_status, runtime_id, runtime_name,
+			 runtime_status, ready, reason, checked_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			item.SquadID, item.AgentID, item.AgentName, item.AgentStatus,
+			item.RuntimeID, item.RuntimeName, item.RuntimeStatus, ready,
+			item.Reason, checkedAt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) Dashboard(ctx context.Context, limit int) (DashboardData, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 100
@@ -708,6 +736,10 @@ func (s *Store) dashboardCursors(ctx context.Context) ([]DashboardCursor, error)
 }
 
 func (s *Store) dashboardRounds(ctx context.Context, limit int) ([]DashboardRound, error) {
+	reviewerNames, err := s.reviewerNames(ctx)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := s.db.QueryContext(ctx, `SELECT
 		r.repo, r.pr_number, r.head_sha, r.base_sha, r.issue_key,
 		r.reviewer_ids_json,
@@ -740,14 +772,35 @@ func (s *Store) dashboardRounds(ctx context.Context, limit int) ([]DashboardRoun
 		}
 		item.Reviewers = make([]DashboardReviewer, 0, len(item.ReviewerIDs))
 		for _, reviewerID := range item.ReviewerIDs {
+			name := reviewerNames[reviewerID]
+			if name == "" {
+				name = reviewerNameFromMentions(reviewerBodies, reviewerID)
+			}
 			item.Reviewers = append(item.Reviewers, DashboardReviewer{
-				ID: reviewerID, Name: reviewerNameFromMentions(reviewerBodies, reviewerID),
+				ID: reviewerID, Name: name,
 			})
 		}
 		if item.DeliveryTotal > 0 && item.DeliveryTotal == item.Delivered {
 			item.Status = "dispatched"
 		}
 		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) reviewerNames(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT agent_id, agent_name FROM reviewer_readiness WHERE agent_name!=''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := map[string]string{}
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		result[id] = name
 	}
 	return result, rows.Err()
 }

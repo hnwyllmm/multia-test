@@ -104,7 +104,7 @@ func TestDashboardSummarizesDispatcherState(t *testing.T) {
 
 	feedback := FeedbackInput{
 		Repo: "owner/repo", EventID: 99, PullNumber: 4, IssueKey: "WANG-4",
-		Body: "multica:fix investigate this line\nextra detail",
+		Body: "[P1] Investigate this line\nextra detail\n<!-- automated-review-finding:v1 fingerprint=abc -->",
 		Metadata: map[string]any{
 			"author": "alice", "url": "https://example.invalid/comment", "path": "main.go", "line": 12,
 		},
@@ -157,7 +157,7 @@ func TestDashboardSummarizesDispatcherState(t *testing.T) {
 		t.Fatalf("unexpected rounds %+v", dashboard.Rounds)
 	}
 	if len(dashboard.Feedback) != 1 || dashboard.Feedback[0].DeliveryStatus != "delivered" ||
-		dashboard.Feedback[0].BodySummary != "multica:fix investigate this line" {
+		dashboard.Feedback[0].BodySummary != "[P1] Investigate this line" {
 		t.Fatalf("unexpected feedback %+v", dashboard.Feedback)
 	}
 	if len(dashboard.PollRuns) != 1 || dashboard.PollRuns[0].Status != "success" {
@@ -165,6 +165,32 @@ func TestDashboardSummarizesDispatcherState(t *testing.T) {
 	}
 	if len(dashboard.ReviewerReadiness) != 1 || !dashboard.ReviewerReadiness[0].Ready ||
 		dashboard.ReviewerReadiness[0].RuntimeStatus != "online" {
+		t.Fatalf("unexpected reviewer readiness %+v", dashboard.ReviewerReadiness)
+	}
+}
+
+func TestReplaceAllReviewerReadinessRemovesPreviousSources(t *testing.T) {
+	store, err := OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.ReplaceReviewerReadiness(ctx, "old-squad", []ReviewerReadiness{{
+		SquadID: "old-squad", AgentID: "old", AgentName: "Old",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceAllReviewerReadiness(ctx, []ReviewerReadiness{{
+		SquadID: "review_dispatch", AgentID: "new", AgentName: "New", Ready: true,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	dashboard, err := store.Dashboard(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dashboard.ReviewerReadiness) != 1 || dashboard.ReviewerReadiness[0].AgentID != "new" {
 		t.Fatalf("unexpected reviewer readiness %+v", dashboard.ReviewerReadiness)
 	}
 }

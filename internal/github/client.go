@@ -32,10 +32,13 @@ type Client struct {
 type PullRequest struct {
 	Number    int
 	Title     string
+	Body      string
 	HTMLURL   string
+	Author    string
 	State     string
 	Draft     bool
 	HeadSHA   string
+	HeadRef   string
 	BaseSHA   string
 	BaseRef   string
 	CreatedAt time.Time
@@ -108,11 +111,13 @@ func (c *Client) ListOpenPulls(ctx context.Context, owner, repo string) ([]PullR
 	var raw []struct {
 		Number  int    `json:"number"`
 		Title   string `json:"title"`
+		Body    string `json:"body"`
 		HTMLURL string `json:"html_url"`
 		State   string `json:"state"`
 		Draft   bool   `json:"draft"`
 		Head    struct {
 			SHA string `json:"sha"`
+			Ref string `json:"ref"`
 		} `json:"head"`
 		Base struct {
 			SHA string `json:"sha"`
@@ -120,6 +125,9 @@ func (c *Client) ListOpenPulls(ctx context.Context, owner, repo string) ([]PullR
 		} `json:"base"`
 		CreatedAt time.Time `json:"created_at"`
 		UpdatedAt time.Time `json:"updated_at"`
+		User      struct {
+			Login string `json:"login"`
+		} `json:"user"`
 	}
 	if err := c.getAll(ctx, endpoint, &raw); err != nil {
 		return nil, fmt.Errorf("list open pulls: %w", err)
@@ -127,8 +135,10 @@ func (c *Client) ListOpenPulls(ctx context.Context, owner, repo string) ([]PullR
 	result := make([]PullRequest, 0, len(raw))
 	for _, item := range raw {
 		result = append(result, PullRequest{
-			Number: item.Number, Title: item.Title, HTMLURL: item.HTMLURL,
-			State: item.State, Draft: item.Draft, HeadSHA: item.Head.SHA,
+			Number: item.Number, Title: item.Title, Body: item.Body, HTMLURL: item.HTMLURL,
+			Author: item.User.Login,
+			State:  item.State, Draft: item.Draft, HeadSHA: item.Head.SHA,
+			HeadRef: item.Head.Ref,
 			BaseSHA: item.Base.SHA, BaseRef: item.Base.Ref,
 			CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
 		})
