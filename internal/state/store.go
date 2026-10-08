@@ -147,14 +147,28 @@ type DashboardPollRun struct {
 	CompletedAt string `json:"completed_at,omitempty"`
 }
 
+type ReviewerReadiness struct {
+	SquadID       string `json:"squad_id"`
+	AgentID       string `json:"agent_id"`
+	AgentName     string `json:"agent_name,omitempty"`
+	AgentStatus   string `json:"agent_status,omitempty"`
+	RuntimeID     string `json:"runtime_id,omitempty"`
+	RuntimeName   string `json:"runtime_name,omitempty"`
+	RuntimeStatus string `json:"runtime_status,omitempty"`
+	Ready         bool   `json:"ready"`
+	Reason        string `json:"reason,omitempty"`
+	CheckedAt     string `json:"checked_at"`
+}
+
 type DashboardData struct {
-	GeneratedAt string              `json:"generated_at"`
-	Summary     DashboardSummary    `json:"summary"`
-	Cursors     []DashboardCursor   `json:"cursors"`
-	Rounds      []DashboardRound    `json:"rounds"`
-	Feedback    []DashboardFeedback `json:"feedback"`
-	Outbox      []DashboardOutbox   `json:"outbox"`
-	PollRuns    []DashboardPollRun  `json:"poll_runs"`
+	GeneratedAt       string              `json:"generated_at"`
+	Summary           DashboardSummary    `json:"summary"`
+	Cursors           []DashboardCursor   `json:"cursors"`
+	Rounds            []DashboardRound    `json:"rounds"`
+	Feedback          []DashboardFeedback `json:"feedback"`
+	Outbox            []DashboardOutbox   `json:"outbox"`
+	PollRuns          []DashboardPollRun  `json:"poll_runs"`
+	ReviewerReadiness []ReviewerReadiness `json:"reviewer_readiness"`
 }
 
 func Open(path string) (*Store, error) {
@@ -263,6 +277,19 @@ func (s *Store) migrate(ctx context.Context) error {
 			error TEXT NOT NULL DEFAULT '',
 			started_at TEXT NOT NULL,
 			completed_at TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS reviewer_readiness (
+			squad_id TEXT NOT NULL,
+			agent_id TEXT NOT NULL,
+			agent_name TEXT NOT NULL DEFAULT '',
+			agent_status TEXT NOT NULL DEFAULT '',
+			runtime_id TEXT NOT NULL DEFAULT '',
+			runtime_name TEXT NOT NULL DEFAULT '',
+			runtime_status TEXT NOT NULL DEFAULT '',
+			ready INTEGER NOT NULL DEFAULT 0,
+			reason TEXT NOT NULL DEFAULT '',
+			checked_at TEXT NOT NULL,
+			PRIMARY KEY (squad_id, agent_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_review_comments_pending ON review_comments(status, next_attempt_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_reviews_pending ON reviews(status, next_attempt_at)`,
@@ -579,6 +606,42 @@ func (s *Store) FinishPoll(ctx context.Context, id int64, runErr error) error {
 	return tx.Commit()
 }
 
+func (s *Store) ReplaceReviewerReadiness(ctx context.Context, squadID string, items []ReviewerReadiness) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM reviewer_readiness WHERE squad_id=?`, squadID); err != nil {
+		return err
+	}
+	checkedAt := timestamp(time.Now())
+	for _, item := range items {
+		ready := 0
+		if item.Ready {
+			ready = 1
+		}
+		if item.SquadID != squadID {
+			return fmt.Errorf("reviewer readiness squad %q does not match %q", item.SquadID, squadID)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO reviewer_readiness
+			(squad_id, agent_id, agent_name, agent_status, runtime_id, runtime_name,
+			 runtime_status, ready, reason, checked_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(squad_id, agent_id) DO UPDATE SET
+				agent_name=excluded.agent_name, agent_status=excluded.agent_status,
+				runtime_id=excluded.runtime_id, runtime_name=excluded.runtime_name,
+				runtime_status=excluded.runtime_status, ready=excluded.ready,
+				reason=excluded.reason, checked_at=excluded.checked_at`,
+			item.SquadID, item.AgentID, item.AgentName, item.AgentStatus,
+			item.RuntimeID, item.RuntimeName, item.RuntimeStatus, ready,
+			item.Reason, checkedAt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) Dashboard(ctx context.Context, limit int) (DashboardData, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 100
@@ -601,6 +664,9 @@ func (s *Store) Dashboard(ctx context.Context, limit int) (DashboardData, error)
 		return result, err
 	}
 	if result.PollRuns, err = s.dashboardPollRuns(ctx, 20); err != nil {
+		return result, err
+	}
+	if result.ReviewerReadiness, err = s.dashboardReviewerReadiness(ctx); err != nil {
 		return result, err
 	}
 	return result, nil
@@ -786,6 +852,29 @@ func (s *Store) dashboardPollRuns(ctx context.Context, limit int) ([]DashboardPo
 		if completed.Valid {
 			item.CompletedAt = completed.String
 		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) dashboardReviewerReadiness(ctx context.Context) ([]ReviewerReadiness, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT squad_id, agent_id, agent_name, agent_status,
+		runtime_id, runtime_name, runtime_status, ready, reason, checked_at
+		FROM reviewer_readiness ORDER BY agent_name, agent_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []ReviewerReadiness{}
+	for rows.Next() {
+		var item ReviewerReadiness
+		var ready int
+		if err := rows.Scan(&item.SquadID, &item.AgentID, &item.AgentName, &item.AgentStatus,
+			&item.RuntimeID, &item.RuntimeName, &item.RuntimeStatus, &ready,
+			&item.Reason, &item.CheckedAt); err != nil {
+			return nil, err
+		}
+		item.Ready = ready == 1
 		result = append(result, item)
 	}
 	return result, rows.Err()

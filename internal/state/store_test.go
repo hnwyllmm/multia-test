@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -136,6 +137,13 @@ func TestDashboardSummarizesDispatcherState(t *testing.T) {
 	if err := store.FinishPoll(ctx, runID, nil); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.ReplaceReviewerReadiness(ctx, "squad", []ReviewerReadiness{{
+		SquadID: "squad", AgentID: "reviewer-id", AgentName: "Review General",
+		AgentStatus: "idle", RuntimeID: "runtime", RuntimeName: "Codex",
+		RuntimeStatus: "online", Ready: true, Reason: "ready",
+	}}); err != nil {
+		t.Fatal(err)
+	}
 
 	dashboard, err := store.Dashboard(ctx, 10)
 	if err != nil {
@@ -154,5 +162,46 @@ func TestDashboardSummarizesDispatcherState(t *testing.T) {
 	}
 	if len(dashboard.PollRuns) != 1 || dashboard.PollRuns[0].Status != "success" {
 		t.Fatalf("unexpected poll runs %+v", dashboard.PollRuns)
+	}
+	if len(dashboard.ReviewerReadiness) != 1 || !dashboard.ReviewerReadiness[0].Ready ||
+		dashboard.ReviewerReadiness[0].RuntimeStatus != "online" {
+		t.Fatalf("unexpected reviewer readiness %+v", dashboard.ReviewerReadiness)
+	}
+}
+
+func TestReplaceReviewerReadinessRemovesStaleMembers(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.ReplaceReviewerReadiness(ctx, "squad", []ReviewerReadiness{
+		{SquadID: "squad", AgentID: "old", AgentName: "Old", Reason: "runtime_offline"},
+		{SquadID: "squad", AgentID: "keep", AgentName: "Keep", Ready: true, Reason: "ready"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceReviewerReadiness(ctx, "squad", []ReviewerReadiness{
+		{SquadID: "squad", AgentID: "keep", AgentName: "Keep", Ready: true, Reason: "ready"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	dashboard, err := store.Dashboard(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dashboard.ReviewerReadiness) != 1 || dashboard.ReviewerReadiness[0].AgentID != "keep" {
+		t.Fatalf("unexpected reviewer readiness %+v", dashboard.ReviewerReadiness)
+	}
+	if err := store.ReplaceReviewerReadiness(ctx, "squad", nil); err != nil {
+		t.Fatal(err)
+	}
+	dashboard, err = store.Dashboard(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dashboard.ReviewerReadiness) != 0 {
+		t.Fatalf("expected empty reviewer readiness, got %+v", dashboard.ReviewerReadiness)
 	}
 }

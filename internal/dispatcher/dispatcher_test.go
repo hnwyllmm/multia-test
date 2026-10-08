@@ -10,6 +10,7 @@ import (
 
 	"github.com/hnwyllmm/multia-test/internal/config"
 	gh "github.com/hnwyllmm/multia-test/internal/github"
+	"github.com/hnwyllmm/multia-test/internal/multica"
 	"github.com/hnwyllmm/multia-test/internal/state"
 )
 
@@ -49,6 +50,40 @@ func TestReviewerScoreStable(t *testing.T) {
 	second := reviewerScore("owner/repo#1@sha", "agent")
 	if first != second || first == reviewerScore("owner/repo#1@other", "agent") {
 		t.Fatal("reviewer score is not stable and input-sensitive")
+	}
+}
+
+func TestReviewerRuntimeReadinessRequiresOnlineRuntime(t *testing.T) {
+	members := []multica.SquadMember{
+		{ID: "leader", Type: "agent", Role: "leader"},
+		{ID: "online-agent", Type: "agent", Role: "member"},
+		{ID: "offline-agent", Type: "agent", Role: "member"},
+		{ID: "missing-agent", Type: "agent", Role: "member"},
+	}
+	agents := []multica.Agent{
+		{ID: "leader", Name: "Leader", Status: "idle", RuntimeBound: true, RuntimeID: "runtime-online"},
+		{ID: "online-agent", Name: "Online", Status: "idle", RuntimeBound: true, RuntimeID: "runtime-online"},
+		{ID: "offline-agent", Name: "Offline", Status: "idle", RuntimeBound: true, RuntimeID: "runtime-offline"},
+	}
+	runtimes := []multica.Runtime{
+		{ID: "runtime-online", Name: "Online runtime", Status: "online"},
+		{ID: "runtime-offline", Name: "Offline runtime", Status: "offline"},
+	}
+	items, byAgent := reviewerRuntimeReadiness("squad", members, agents, runtimes)
+	if len(items) != 3 {
+		t.Fatalf("readiness size=%d", len(items))
+	}
+	if _, found := byAgent["leader"]; found {
+		t.Fatalf("squad leader must not be reported as a reviewer: %+v", byAgent["leader"])
+	}
+	if !byAgent["online-agent"].Ready || byAgent["online-agent"].Reason != "ready" {
+		t.Fatalf("online agent=%+v", byAgent["online-agent"])
+	}
+	if byAgent["offline-agent"].Ready || byAgent["offline-agent"].Reason != "runtime_offline" {
+		t.Fatalf("offline agent=%+v", byAgent["offline-agent"])
+	}
+	if byAgent["missing-agent"].Ready || byAgent["missing-agent"].Reason != "agent_missing" {
+		t.Fatalf("missing agent=%+v", byAgent["missing-agent"])
 	}
 }
 

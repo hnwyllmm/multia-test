@@ -95,6 +95,10 @@ tbody tr:hover { background: color-mix(in srgb, var(--green) 4%, var(--surface))
 .cursor-list { padding: 8px 20px 18px; }
 .cursor { display: flex; justify-content: space-between; gap: 16px; padding: 7px 0; font-size: 11px; }
 .cursor span:last-child { color: var(--muted); text-align: right; }
+.readiness-list { padding: 8px 20px 18px; }
+.readiness { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 9px 0; }
+.readiness-main { min-width: 0; font-size: 12px; }
+.readiness-main .secondary { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .empty { margin: 0; padding: 34px 20px; color: var(--muted); text-align: center; }
 .last-error { max-width: 360px; color: var(--red); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 

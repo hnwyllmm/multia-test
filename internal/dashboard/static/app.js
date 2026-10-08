@@ -36,8 +36,8 @@ function relativeTime(value) {
 
 function statusClass(status) {
   const value = (status || "").toLowerCase();
-  if (["success", "delivered", "dispatched"].includes(value)) return "good";
-  if (["error", "permanent_error", "failed"].includes(value)) return "bad";
+  if (["success", "delivered", "dispatched", "ready", "online"].includes(value)) return "good";
+  if (["error", "permanent_error", "failed"].includes(value) || value.includes("offline")) return "bad";
   return "warn";
 }
 
@@ -223,6 +223,35 @@ function renderCursors(items) {
   }
 }
 
+function renderReviewerReadiness(items) {
+  const target = byId("reviewer-readiness");
+  target.replaceChildren();
+  const filtered = items.filter((item) => matches(
+    item.agent_name,
+    item.agent_status,
+    item.runtime_name,
+    item.runtime_status,
+    item.reason,
+  ));
+  for (const item of filtered) {
+    const wrapper = node("div", "readiness");
+    const identity = node("div", "readiness-main");
+    identity.append(
+      node("span", "primary", item.agent_name || "未知 Reviewer"),
+      node("span", "secondary", item.runtime_name || "未绑定 runtime"),
+    );
+    identity.title = `agent ${item.agent_id}${item.runtime_id ? ` · runtime ${item.runtime_id}` : ""}`;
+    const status = badge(item.ready ? "ready" : (item.reason || "not_ready"));
+    status.title = `agent=${item.agent_status || "unknown"} · runtime=${item.runtime_status || "unknown"} · checked=${formatTime(item.checked_at)}`;
+    wrapper.append(identity, status);
+    target.append(wrapper);
+  }
+  if (!target.children.length) {
+    const message = state.filter && items.length > 0 ? "没有匹配的 reviewer" : "尚未检查 reviewer runtime";
+    target.append(node("div", "empty", message));
+  }
+}
+
 function renderOutbox(items) {
   const target = byId("outbox");
   target.replaceChildren();
@@ -253,6 +282,7 @@ function render() {
   renderFeedback(payload.data.feedback);
   renderPolls(payload.data.poll_runs);
   renderCursors(payload.data.cursors);
+  renderReviewerReadiness(payload.data.reviewer_readiness || []);
   renderOutbox(payload.data.outbox);
   setText("subtitle", `${payload.workspace_prefix} workspace · ${payload.workspace_id} · 每 ${payload.poll_interval_seconds}s 轮询`);
   setText("updated", `数据生成于 ${formatTime(payload.data.generated_at)} · 自动刷新 ${payload.refresh_interval_seconds}s`);

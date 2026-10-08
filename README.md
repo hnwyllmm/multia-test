@@ -93,8 +93,9 @@ markers before retries to prevent duplicate mentions after an ambiguous write.
 ## Read-only dashboard
 
 The dashboard shows repository and PR review rounds, linked Multica issues,
-GitHub feedback, delivery retries, cursors, and recent poll health. It reads
-SQLite directly and does not require GitHub or Multica credentials.
+GitHub feedback, delivery retries, cursors, recent poll health, and the latest
+runtime readiness check for each selectable reviewer. It reads SQLite directly
+and does not require GitHub or Multica credentials.
 Set `multica.workspace_url` to the public workspace URL so issue identifiers in
 the review-round table link to their Multica issue pages. Reviewer display names
 are recovered from the persisted dispatch mentions; UUIDs remain available only
@@ -128,8 +129,12 @@ codex plugin add open-code-review-codex@open-code-review --json
 
 Only agents that have passed a local `ocr --version`, delegate preview, and
 Codex plugin readiness check should be added to the configured review squad.
-The squad is therefore the dispatcher-side readiness allow-list. Reviewer and
-worker instruction templates are in [`deploy/agent-instructions`](deploy/agent-instructions).
+Before every new review round, the dispatcher also reads Multica runtime status
+and selects only non-leader reviewer agents whose bound runtime is currently
+`online`. An offline, missing, or unbound runtime defers the PR without creating
+a misleading review round. The latest decision is persisted for the dashboard.
+Reviewer and worker instruction templates are in
+[`deploy/agent-instructions`](deploy/agent-instructions).
 
 ## Deployment
 

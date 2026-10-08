@@ -35,9 +35,17 @@ type Issue struct {
 type Agent struct {
 	ID           string
 	Name         string
+	RuntimeID    string
 	RuntimeBound bool
 	Status       string
 	Archived     bool
+}
+
+type Runtime struct {
+	ID         string
+	Name       string
+	Status     string
+	LastSeenAt string
 }
 
 type Squad struct {
@@ -104,8 +112,24 @@ func (c *Client) ListAgents(ctx context.Context) ([]Agent, error) {
 	for _, item := range raw {
 		result = append(result, Agent{
 			ID: stringValue(item, "id"), Name: stringValue(item, "name"),
+			RuntimeID:    stringValue(item, "runtime_id"),
 			RuntimeBound: boolValue(item, "runtime_bound"), Status: stringValue(item, "status"),
 			Archived: item["archived_at"] != nil && stringValue(item, "archived_at") != "",
+		})
+	}
+	return result, nil
+}
+
+func (c *Client) ListRuntimes(ctx context.Context) ([]Runtime, error) {
+	raw, err := c.runList(ctx, "runtime", "list", "--output", "json")
+	if err != nil {
+		return nil, fmt.Errorf("list runtimes: %w", err)
+	}
+	result := make([]Runtime, 0, len(raw))
+	for _, item := range raw {
+		result = append(result, Runtime{
+			ID: stringValue(item, "id"), Name: stringValue(item, "name"),
+			Status: stringValue(item, "status"), LastSeenAt: stringValue(item, "last_seen_at"),
 		})
 	}
 	return result, nil

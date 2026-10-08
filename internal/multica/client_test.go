@@ -86,6 +86,28 @@ func TestClientReloadsRotatedTokenFileAndStripsProxy(t *testing.T) {
 	}
 }
 
+func TestClientListsRuntimeStatus(t *testing.T) {
+	cli := fakeCLI(t)
+	t.Setenv("TEST_MULTICA_SERVER", "https://multica.example")
+	t.Setenv("TEST_MULTICA_TOKEN", "valid")
+	t.Setenv("EXPECTED_MULTICA_TOKEN", "valid")
+	client, err := New(config.MulticaConfig{
+		CLIPath: cli, ServerURLEnv: "TEST_MULTICA_SERVER", WorkspaceID: "workspace",
+		Auth: config.SecretRef{Type: "env", Name: "TEST_MULTICA_TOKEN"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimes, err := client.ListRuntimes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runtimes) != 1 || runtimes[0].ID != "runtime" || runtimes[0].Status != "online" ||
+		runtimes[0].LastSeenAt != "2026-10-08T10:00:00+08:00" {
+		t.Fatalf("unexpected runtimes: %+v", runtimes)
+	}
+}
+
 func fakeCLI(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "multica")
@@ -101,6 +123,10 @@ fi
 if [ "$MULTICA_SERVER_URL" != "https://multica.example" ] || [ "$MULTICA_WORKSPACE_ID" != "workspace" ]; then
   echo "wrong multica environment" >&2
   exit 43
+fi
+if [ "$1" = "runtime" ] && [ "$2" = "list" ]; then
+  printf '[{"id":"runtime","name":"Codex","status":"online","last_seen_at":"2026-10-08T10:00:00+08:00"}]\n'
+  exit 0
 fi
 printf '{"id":"workspace"}\n'
 `

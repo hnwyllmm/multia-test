@@ -350,9 +350,17 @@ func (d *Dispatcher) selectReviewers(ctx context.Context, repository config.Repo
 	if err != nil {
 		return nil, err
 	}
+	runtimes, err := d.multica.ListRuntimes(ctx)
+	if err != nil {
+		return nil, err
+	}
 	agentByID := make(map[string]multica.Agent, len(agents))
 	for _, agent := range agents {
 		agentByID[agent.ID] = agent
+	}
+	readiness, readinessByAgent := reviewerRuntimeReadiness(repository.ReviewerSquadID, members, agents, runtimes)
+	if err := d.store.ReplaceReviewerReadiness(ctx, repository.ReviewerSquadID, readiness); err != nil {
+		return nil, fmt.Errorf("record reviewer runtime readiness: %w", err)
 	}
 	excluded := map[string]struct{}{squad.LeaderID: {}}
 	if issue.AssigneeType == "agent" && issue.AssigneeID != "" {
@@ -382,14 +390,15 @@ func (d *Dispatcher) selectReviewers(ctx context.Context, repository config.Repo
 			continue
 		}
 		agent, ok := agentByID[member.ID]
-		if !ok || !agent.RuntimeBound || agent.Archived || strings.EqualFold(agent.Status, "disabled") || strings.EqualFold(agent.Status, "archived") {
+		readiness, ready := readinessByAgent[member.ID]
+		if !ok || !ready || !readiness.Ready {
 			continue
 		}
 		seen[member.ID] = struct{}{}
 		candidates = append(candidates, agent)
 	}
 	if len(candidates) == 0 {
-		return nil, errors.New("review squad has no eligible reviewer agents")
+		return nil, fmt.Errorf("review squad has no eligible reviewer agents (%s)", reviewerReadinessSummary(readiness))
 	}
 	seed := fmt.Sprintf("%s#%d@%s", repository.GitHub, pull.Number, pull.HeadSHA)
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
@@ -407,6 +416,80 @@ func (d *Dispatcher) selectReviewers(ctx context.Context, repository config.Repo
 		d.logger.Warn("reviewer count degraded", "repo", repository.GitHub, "requested", repository.ReviewerCount, "available", len(candidates))
 	}
 	return candidates[:count], nil
+}
+
+func reviewerRuntimeReadiness(squadID string, members []multica.SquadMember, agents []multica.Agent, runtimes []multica.Runtime) ([]state.ReviewerReadiness, map[string]state.ReviewerReadiness) {
+	agentByID := make(map[string]multica.Agent, len(agents))
+	for _, agent := range agents {
+		agentByID[agent.ID] = agent
+	}
+	runtimeByID := make(map[string]multica.Runtime, len(runtimes))
+	for _, runtime := range runtimes {
+		runtimeByID[runtime.ID] = runtime
+	}
+	result := make([]state.ReviewerReadiness, 0, len(members))
+	byAgent := make(map[string]state.ReviewerReadiness, len(members))
+	for _, member := range members {
+		if member.Type != "agent" || member.ID == "" || strings.EqualFold(member.Role, "leader") {
+			continue
+		}
+		item := state.ReviewerReadiness{SquadID: squadID, AgentID: member.ID}
+		agent, found := agentByID[member.ID]
+		if !found {
+			item.Reason = "agent_missing"
+		} else {
+			item.AgentName = agent.Name
+			item.AgentStatus = agent.Status
+			item.RuntimeID = agent.RuntimeID
+			switch {
+			case agent.Archived:
+				item.Reason = "agent_archived"
+			case strings.EqualFold(agent.Status, "disabled"), strings.EqualFold(agent.Status, "archived"):
+				item.Reason = "agent_" + strings.ToLower(agent.Status)
+			case !agent.RuntimeBound || agent.RuntimeID == "":
+				item.Reason = "runtime_unbound"
+			default:
+				runtime, found := runtimeByID[agent.RuntimeID]
+				if !found {
+					item.Reason = "runtime_missing"
+				} else {
+					item.RuntimeName = runtime.Name
+					item.RuntimeStatus = runtime.Status
+					if strings.EqualFold(runtime.Status, "online") {
+						item.Ready = true
+						item.Reason = "ready"
+					} else if runtime.Status == "" {
+						item.Reason = "runtime_unknown"
+					} else {
+						item.Reason = "runtime_" + strings.ToLower(runtime.Status)
+					}
+				}
+			}
+		}
+		result = append(result, item)
+		byAgent[item.AgentID] = item
+	}
+	return result, byAgent
+}
+
+func reviewerReadinessSummary(items []state.ReviewerReadiness) string {
+	counts := map[string]int{}
+	for _, item := range items {
+		counts[item.Reason]++
+	}
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%d", key, counts[key]))
+	}
+	if len(parts) == 0 {
+		return "no agent members"
+	}
+	return strings.Join(parts, ", ")
 }
 
 func (d *Dispatcher) assigneeMention(ctx context.Context, issue multica.Issue, agents map[string]multica.Agent) (string, error) {
