@@ -529,17 +529,26 @@ func reviewerReadinessSummary(items []state.ReviewerReadiness) string {
 }
 
 func (d *Dispatcher) assigneeMention(ctx context.Context, issue multica.Issue, agents map[string]multica.Agent) (string, error) {
+	if issue.AssigneeID == "" {
+		return "", errors.New("issue has no assignee")
+	}
 	switch issue.AssigneeType {
 	case "agent":
+		name := "assigned agent"
 		agent, ok := agents[issue.AssigneeID]
-		if !ok {
-			return "", errors.New("issue assignee agent is missing")
+		if ok && strings.TrimSpace(agent.Name) != "" {
+			name = agent.Name
 		}
-		return fmt.Sprintf("[@%s](mention://agent/%s)", agent.Name, agent.ID), nil
+		// Private agents may be valid issue assignees while remaining absent from
+		// `agent list` for the dispatcher's member-scoped token. The mention URI,
+		// not its display label, is authoritative for wake-up routing.
+		return fmt.Sprintf("[@%s](mention://agent/%s)", name, issue.AssigneeID), nil
 	case "squad":
 		squad, err := d.multica.GetSquad(ctx, issue.AssigneeID)
 		if err != nil {
-			return "", fmt.Errorf("get assignee squad: %w", err)
+			d.logger.Warn("assignee squad name unavailable; using ID-based mention",
+				"squad_id", issue.AssigneeID, "error", err)
+			return fmt.Sprintf("[@assigned squad](mention://squad/%s)", issue.AssigneeID), nil
 		}
 		return fmt.Sprintf("[@%s](mention://squad/%s)", squad.Name, squad.ID), nil
 	default:

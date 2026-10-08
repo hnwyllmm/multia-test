@@ -176,6 +176,34 @@ func TestFeedbackMessageFallsBackToPullURL(t *testing.T) {
 	}
 }
 
+func TestAssigneeMentionFallsBackToPrivateAgentID(t *testing.T) {
+	dispatcher := &Dispatcher{}
+	mention, err := dispatcher.assigneeMention(context.Background(), multica.Issue{
+		AssigneeType: "agent",
+		AssigneeID:   "private-agent-id",
+	}, map[string]multica.Agent{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mention != "[@assigned agent](mention://agent/private-agent-id)" {
+		t.Fatalf("unexpected private-agent mention %q", mention)
+	}
+}
+
+func TestAssigneeMentionUsesVisibleAgentName(t *testing.T) {
+	dispatcher := &Dispatcher{}
+	mention, err := dispatcher.assigneeMention(context.Background(), multica.Issue{
+		AssigneeType: "agent",
+		AssigneeID:   "agent-id",
+	}, map[string]multica.Agent{"agent-id": {ID: "agent-id", Name: "Worker"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mention != "[@Worker](mention://agent/agent-id)" {
+		t.Fatalf("unexpected visible-agent mention %q", mention)
+	}
+}
+
 func TestPullWithoutMulticaIssueDispatchesReviewOnce(t *testing.T) {
 	t.Setenv("TEST_GITHUB_TOKEN", "github-token")
 	var webhookCalls int
