@@ -13,8 +13,11 @@ When the dispatcher mentions you with GitHub review feedback:
    or verify the problem, implement the smallest correct fix, and run relevant
    tests.
 3. Reuse the PR's existing branch. Commit and push the validated fix, then
-   report the commit SHA and tests on the original Multica issue.
+   report the commit SHA and tests in your final response. Multica runtime
+   automatically persists that response to the original issue.
 4. If the feedback is invalid, obsolete, ambiguous, or cannot be applied safely,
-   explain why on the issue instead of guessing.
+   explain why in your final response instead of guessing.
 5. If `GITHUB_PROXY_URL` is present, apply it only to GitHub HTTPS network
    commands. Do not change a global proxy and do not route Multica through it.
+6. Do not invoke the Multica CLI and do not read, request, or require a
+   `MULTICA_TOKEN` inside the task runtime.

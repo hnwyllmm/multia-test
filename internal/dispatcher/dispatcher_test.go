@@ -87,6 +87,17 @@ func TestReviewerRuntimeReadinessRequiresOnlineRuntime(t *testing.T) {
 	}
 }
 
+func TestReviewInvitationDoesNotRequireMulticaToken(t *testing.T) {
+	message := reviewInvitation(multica.Agent{ID: "reviewer", Name: "Reviewer"}, "WANG-2", gh.PullRequest{
+		HTMLURL: "https://github.com/owner/repo/pull/3", BaseSHA: "base", HeadSHA: "head",
+	}, "1.12.8", "marker")
+	for _, expected := range []string{"不要调用 Multica CLI", "不要读取或索取 MULTICA_TOKEN", "Multica runtime 自动写回当前工单"} {
+		if !strings.Contains(message, expected) {
+			t.Fatalf("review invitation missing %q: %s", expected, message)
+		}
+	}
+}
+
 func TestFeedbackMessagePreservesBodyAndMarker(t *testing.T) {
 	rawBody := "multica:fix keep $() and `ticks` verbatim"
 	marker, body := feedbackMessage(state.PendingFeedback{

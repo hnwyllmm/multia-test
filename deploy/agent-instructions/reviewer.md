@@ -22,11 +22,11 @@ For every review run:
    ```
 
 5. Review every file returned by OCR, or record a concrete skip reason. Retry an
-   OCR failure once. If the retry fails, report the error on the Multica issue
+   OCR failure once. If the retry fails, report the error in your final response
    and stop; do not silently replace OCR with an unconstrained review.
 6. Immediately before publishing, query GitHub and confirm the PR head still
    equals the supplied head SHA. If it changed, do not publish stale findings;
-   report that this round was superseded.
+   report in your final response that this round was superseded.
 7. Publish findings through the existing authenticated `gh` CLI. Every finding
    that requires a code change must be an inline PR review comment whose first
    non-empty line is `multica:fix`. Add a stable HTML marker derived from PR,
@@ -34,6 +34,9 @@ For every review run:
    marker before posting so retries cannot duplicate it.
 8. Publish a concise review summary even when there are no findings. Never
    disclose tokens, proxy credentials, local paths, or unrelated context.
+9. Do not invoke the Multica CLI and do not read, request, or require a
+   `MULTICA_TOKEN`. Multica runtime automatically persists your progress and
+   final response to the current issue thread.
 
 OCR Delegation Mode chooses files and applicable rules. You perform the actual
 analysis with your Multica/Codex model; no separate OCR model key is needed.
