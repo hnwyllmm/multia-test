@@ -1,0 +1,59 @@
+poll_interval: 60s
+bootstrap_lookback: 24h
+
+github:
+  auth:
+    type: env
+    name: GITHUB_TOKEN
+  proxy:
+    type: url_env
+    name: GITHUB_PROXY_URL
+    required: true
+    connect_timeout: 10s
+    request_timeout: 30s
+
+multica:
+  server_url_env: MULTICA_SERVER_URL
+  workspace_id: a6cee5b0-f694-4978-97ce-f15b26b2a6af
+  workspace_url: https://antmultica.alipay.com/wangyunlai
+  workspace_prefix: WANG
+  auth:
+    type: env
+    name: MULTICA_TOKEN
+
+review_dispatch:
+  enabled: true
+  request_timeout: 30s
+  agents:
+    - id: REPLACE_WITH_REVIEWER_A_AGENT_ID
+      name: Review-General-A
+      webhook:
+        type: env
+        name: REVIEW_GENERAL_A_WEBHOOK_URL
+    - id: REPLACE_WITH_REVIEWER_B_AGENT_ID
+      name: Review-General-B
+      webhook:
+        type: env
+        name: REVIEW_GENERAL_B_WEBHOOK_URL
+
+dashboard:
+  listen: 127.0.0.1:8787
+  refresh_interval: 10s
+
+repositories:
+  - github: hnwyllmm/multia-test
+    target_branches:
+      - master
+      - "release/**"
+    reviewer_ids:
+      - REPLACE_WITH_REVIEWER_A_AGENT_ID
+      - REPLACE_WITH_REVIEWER_B_AGENT_ID
+    reviewer_count: 1
+    review_engine: ocr_delegate
+    ocr_version: "1.12.8"
+    finding_marker: "automated-review-finding:v1"
+    review_comment_mode: marked
+    process_changes_requested: true
+    trust_mode: any
+
+state_db: /data/wangyunlai.wyl/multica-github-dispatcher/state.db

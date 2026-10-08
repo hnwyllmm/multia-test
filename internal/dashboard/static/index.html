@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Multica Review Dispatcher</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">M</div>
+      <div>
+        <div class="eyebrow">ANTMULTICA × GITHUB</div>
+        <h1>Review Dispatcher</h1>
+      </div>
+    </div>
+    <div class="top-actions">
+      <div id="health" class="health" aria-live="polite">
+        <span class="health-dot"></span><span>正在加载</span>
+      </div>
+      <button id="refresh" type="button">刷新</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="intro">
+      <div>
+        <p class="kicker">AUTOMATION CONTROL PLANE</p>
+        <h2>PR 审查与修复回流</h2>
+        <p id="subtitle" class="muted">正在读取 dispatcher 状态…</p>
+      </div>
+      <div class="intro-tools">
+        <label for="filter">筛选</label>
+        <input id="filter" type="search" placeholder="仓库、PR、工单或事件" autocomplete="off">
+        <div id="updated" class="updated">—</div>
+      </div>
+    </section>
+
+    <div id="error" class="error" role="alert" hidden></div>
+
+    <section class="metrics" aria-label="关键指标">
+      <article><span>Repositories</span><strong id="metric-repos">—</strong></article>
+      <article><span>Review rounds</span><strong id="metric-rounds">—</strong></article>
+      <article><span>Feedback events</span><strong id="metric-feedback">—</strong></article>
+      <article><span>Pending delivery</span><strong id="metric-pending">—</strong></article>
+      <article><span>Failures</span><strong id="metric-failures">—</strong></article>
+    </section>
+
+    <section class="panel rounds-panel">
+      <div class="panel-heading">
+        <div><p class="section-index">01</p><h3>PR review rounds</h3></div>
+        <span id="round-count" class="count">0</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Pull request</th><th>关联工单</th><th>Commit range</th><th>Reviewer</th><th>Status</th><th>Created</th></tr></thead>
+          <tbody id="rounds"></tbody>
+        </table>
+      </div>
+      <p id="rounds-empty" class="empty" hidden>还没有 review round。</p>
+    </section>
+
+    <div class="two-column">
+      <section class="panel">
+        <div class="panel-heading">
+          <div><p class="section-index">02</p><h3>Review feedback</h3></div>
+          <span id="feedback-count" class="count">0</span>
+        </div>
+        <div id="feedback" class="event-list"></div>
+        <p id="feedback-empty" class="empty" hidden>还没有 review comment 回流。</p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div><p class="section-index">03</p><h3>Poll health</h3></div>
+          <span id="poll-count" class="count">0</span>
+        </div>
+        <div id="polls" class="event-list compact"></div>
+        <p id="polls-empty" class="empty" hidden>尚无 poll heartbeat。</p>
+        <div class="cursor-heading">Event cursors</div>
+        <div id="cursors" class="cursor-list"></div>
+        <div class="cursor-heading">Reviewer trigger readiness</div>
+        <div id="reviewer-readiness" class="readiness-list"></div>
+      </section>
+    </div>
+
+    <section class="panel">
+      <div class="panel-heading">
+        <div><p class="section-index">04</p><h3>Delivery outbox</h3></div>
+        <span id="outbox-count" class="count">0</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Event</th><th>Issue</th><th>Status</th><th>Attempts</th><th>Last error</th><th>Updated</th></tr></thead>
+          <tbody id="outbox"></tbody>
+        </table>
+      </div>
+      <p id="outbox-empty" class="empty" hidden>Outbox 为空。</p>
+    </section>
+  </main>
+
+  <footer><span id="version">multica-github-dispatcher</span><span>Read-only · no built-in authentication</span></footer>
+  <script src="/app.js" defer></script>
+</body>
+</html>
