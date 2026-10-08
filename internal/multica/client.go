@@ -61,9 +61,16 @@ type SquadMember struct {
 }
 
 type Comment struct {
-	ID        string `json:"id"`
-	Content   string `json:"content"`
-	CreatedAt string `json:"created_at"`
+	ID        string
+	Content   string
+	CreatedAt time.Time
+}
+
+type IssueRun struct {
+	ID        string
+	AgentID   string
+	Status    string
+	CreatedAt time.Time
 }
 
 func New(cfg config.MulticaConfig) (*Client, error) {
@@ -184,17 +191,43 @@ func (c *Client) ListComments(ctx context.Context, issueID string) ([]Comment, e
 	for _, item := range raw {
 		result = append(result, Comment{
 			ID: stringValue(item, "id"), Content: stringValue(item, "content"),
-			CreatedAt: stringValue(item, "created_at"),
+			CreatedAt: timeValue(item, "created_at"),
 		})
 	}
 	return result, nil
 }
 
-func (c *Client) AddComment(ctx context.Context, issueID, content string) error {
-	var response json.RawMessage
+func (c *Client) AddComment(ctx context.Context, issueID, content string) (Comment, error) {
+	var response map[string]any
 	if err := c.runJSON(ctx, strings.NewReader(content), &response,
 		"issue", "comment", "add", issueID, "--content-stdin", "--output", "json"); err != nil {
-		return fmt.Errorf("add issue comment: %w", err)
+		return Comment{}, fmt.Errorf("add issue comment: %w", err)
+	}
+	return Comment{
+		ID: stringValue(response, "id"), Content: stringValue(response, "content"),
+		CreatedAt: timeValue(response, "created_at"),
+	}, nil
+}
+
+func (c *Client) ListIssueRuns(ctx context.Context, issueID string) ([]IssueRun, error) {
+	raw, err := c.runList(ctx, "issue", "runs", issueID, "--output", "json")
+	if err != nil {
+		return nil, fmt.Errorf("list issue runs: %w", err)
+	}
+	result := make([]IssueRun, 0, len(raw))
+	for _, item := range raw {
+		result = append(result, IssueRun{
+			ID: stringValue(item, "id"), AgentID: stringValue(item, "agent_id"),
+			Status: stringValue(item, "status"), CreatedAt: timeValue(item, "created_at"),
+		})
+	}
+	return result, nil
+}
+
+func (c *Client) RerunIssue(ctx context.Context, issueID string) error {
+	var response json.RawMessage
+	if err := c.runJSON(ctx, nil, &response, "issue", "rerun", issueID, "--output", "json"); err != nil {
+		return fmt.Errorf("rerun issue: %w", err)
 	}
 	return nil
 }
@@ -321,6 +354,12 @@ func boolValue(item map[string]any, key string) bool {
 		return result
 	}
 	return strings.EqualFold(fmt.Sprint(value), "true")
+}
+
+func timeValue(item map[string]any, key string) time.Time {
+	value := stringValue(item, key)
+	parsed, _ := time.Parse(time.RFC3339Nano, value)
+	return parsed
 }
 
 func RetryDelay(attempt int) time.Duration {

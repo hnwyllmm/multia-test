@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hnwyllmm/multia-test/internal/config"
 )
@@ -108,6 +109,38 @@ func TestClientListsRuntimeStatus(t *testing.T) {
 	}
 }
 
+func TestClientSupportsCommentAndNativeIssueRerun(t *testing.T) {
+	cli := fakeCLI(t)
+	t.Setenv("TEST_MULTICA_SERVER", "https://multica.example")
+	t.Setenv("TEST_MULTICA_TOKEN", "valid")
+	t.Setenv("EXPECTED_MULTICA_TOKEN", "valid")
+	client, err := New(config.MulticaConfig{
+		CLIPath: cli, ServerURLEnv: "TEST_MULTICA_SERVER", WorkspaceID: "workspace",
+		Auth: config.SecretRef{Type: "env", Name: "TEST_MULTICA_TOKEN"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	comment, err := client.AddComment(context.Background(), "SEEK-9", "feedback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedTime := time.Date(2026, 10, 8, 8, 0, 0, 0, time.UTC)
+	if comment.ID != "comment" || !comment.CreatedAt.Equal(expectedTime) {
+		t.Fatalf("unexpected comment %+v", comment)
+	}
+	runs, err := client.ListIssueRuns(context.Background(), "SEEK-9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].ID != "run" || runs[0].AgentID != "agent" || !runs[0].CreatedAt.Equal(expectedTime) {
+		t.Fatalf("unexpected runs %+v", runs)
+	}
+	if err := client.RerunIssue(context.Background(), "SEEK-9"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func fakeCLI(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "multica")
@@ -126,6 +159,18 @@ if [ "$MULTICA_SERVER_URL" != "https://multica.example" ] || [ "$MULTICA_WORKSPA
 fi
 if [ "$1" = "runtime" ] && [ "$2" = "list" ]; then
   printf '[{"id":"runtime","name":"Codex","status":"online","last_seen_at":"2026-10-08T10:00:00+08:00"}]\n'
+  exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "comment" ] && [ "$3" = "add" ]; then
+  printf '{"id":"comment","content":"feedback","created_at":"2026-10-08T08:00:00Z"}\n'
+  exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "runs" ]; then
+  printf '[{"id":"run","agent_id":"agent","status":"completed","created_at":"2026-10-08T08:00:00Z"}]\n'
+  exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "rerun" ]; then
+  printf '{"id":"new-run","status":"queued"}\n'
   exit 0
 fi
 printf '{"id":"workspace"}\n'
