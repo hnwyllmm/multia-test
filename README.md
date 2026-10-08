@@ -4,8 +4,8 @@
 Multica issues and starts reviewer Agents through `run_only` Autopilot
 webhooks. A Multica issue is optional context, not a prerequisite for review.
 
-It runs two independent polling lanes. Set `review_dispatch.enabled: false` to
-stop the first lane without stopping GitHub feedback delivery:
+It runs three independent polling lanes. Set `review_dispatch.enabled: false`
+to stop the first lane without stopping GitHub feedback delivery:
 
 1. A new open PR, or a new head SHA on an existing PR, creates one review
    round. Reviewers are selected deterministically from the repository's
@@ -23,6 +23,13 @@ stop the first lane without stopping GitHub feedback delivery:
    wake it again. Mention routing uses the assignee ID, so a private Agent can
    still be awakened even when the dispatcher's member-scoped token cannot
    list its display name.
+3. With `process_ci_failures: true`, failed GitHub check runs and commit
+   statuses notify the same issue assignee. CI is checked only for eligible PRs
+   that carry an issue key, at `ci_poll_interval`. One notification is emitted
+   per PR head SHA, so retries on the same commit do not create repeated issue
+   comments; a new head SHA is evaluated independently. On first startup,
+   failures older than `bootstrap_lookback` are treated as history and do not
+   generate issue comments.
 
 The dispatcher never exposes an inbound event port. GitHub is read through its
 REST API, reviewer webhooks are outbound HTTP(S) requests, and optional Multica
@@ -48,12 +55,12 @@ false, reviewer agents, webhook secrets, OCR settings, and review rounds are
 not required; feedback polling and Multica issue notifications remain active.
 Secrets are references, not literal YAML values.
 
-Use a repository's `target_branches` to limit both automatic review and
-feedback routing by the PR base branch. Entries are exact branch names or a
-prefix ending in `/**`; for example, `[master, "release/**"]` accepts `master`,
-`release/1.5.0`, and deeper release branches, but rejects `main` and feature
-branches. Omitting `target_branches` preserves the previous all-branches
-behavior.
+Use a repository's `target_branches` to limit automatic review, review-feedback
+routing, and CI-failure routing by the PR base branch. Entries are exact branch
+names or a prefix ending in `/**`; for example, `[master, "release/**"]`
+accepts `master`, `release/1.5.0`, and deeper release branches, but rejects
+`main` and feature branches. Omitting `target_branches` preserves the previous
+all-branches behavior.
 
 The GitHub proxy is entirely user supplied. The dispatcher does not create or
 modify a proxy:
@@ -115,11 +122,11 @@ webhook or Multica comment.
 SQLite runs in WAL mode. A review round is keyed by
 `owner/repo + PR number + head SHA`. GitHub feedback is keyed by `comment.id`
 or `review.id`, so editing a previously processed comment does not re-trigger
-work. A five-minute overlap on the per-repository review-comment cursor avoids
-boundary loss. Review webhook requests carry the round event key in both JSON
-and the `Idempotency-Key` header. Multica feedback comments carry HTML markers;
-the outbox checks those markers before retries to prevent duplicate mentions
-after an ambiguous write.
+work. CI failures are keyed by `PR number + head SHA`. A five-minute overlap on
+the per-repository review-comment cursor avoids boundary loss. Review webhook
+requests carry the round event key in both JSON and the `Idempotency-Key`
+header. Multica feedback comments carry HTML markers; the outbox checks those
+markers before retries to prevent duplicate mentions after an ambiguous write.
 
 ## Read-only dashboard
 

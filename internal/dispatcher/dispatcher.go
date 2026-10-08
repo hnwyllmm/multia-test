@@ -115,6 +115,9 @@ func (d *Dispatcher) Once(ctx context.Context, dryRun bool) error {
 		if err := d.discoverReviews(ctx, repository, owner, repo, pulls, dryRun); err != nil {
 			laneErrors = append(laneErrors, fmt.Errorf("%s reviews: %w", repository.GitHub, err))
 		}
+		if err := d.discoverCIFailures(ctx, repository, owner, repo, pulls, dryRun); err != nil {
+			laneErrors = append(laneErrors, fmt.Errorf("%s CI failures: %w", repository.GitHub, err))
+		}
 	}
 
 	if !dryRun {
@@ -307,6 +310,139 @@ func (d *Dispatcher) discoverReviews(ctx context.Context, repository config.Repo
 	return errors.Join(laneErrors...)
 }
 
+type detectedCIFailure struct {
+	Name       string
+	State      string
+	Source     string
+	URL        string
+	OccurredAt time.Time
+}
+
+func (d *Dispatcher) discoverCIFailures(ctx context.Context, repository config.Repository, owner, repo string, pulls []gh.PullRequest, dryRun bool) error {
+	if !repository.ProcessCIFailures {
+		return nil
+	}
+	now := d.now()
+	var laneErrors []error
+	for _, pull := range pulls {
+		if pull.Draft {
+			continue
+		}
+		issueKey, ok := issueKeyFromPull(d.cfg.Multica.Prefix, pull.Title, pull.Body)
+		if !ok {
+			continue
+		}
+		due, err := d.store.CIPollDue(ctx, repository.GitHub, pull.Number, pull.HeadSHA, now, d.cfg.CIPollInterval.Duration)
+		if err != nil {
+			laneErrors = append(laneErrors, fmt.Errorf("PR %d CI schedule: %w", pull.Number, err))
+			continue
+		}
+		if !due {
+			continue
+		}
+		checkRuns, err := d.github.ListCheckRuns(ctx, owner, repo, pull.HeadSHA)
+		if err != nil {
+			laneErrors = append(laneErrors, fmt.Errorf("PR %d check runs: %w", pull.Number, err))
+			continue
+		}
+		statuses, err := d.github.ListCommitStatuses(ctx, owner, repo, pull.HeadSHA)
+		if err != nil {
+			laneErrors = append(laneErrors, fmt.Errorf("PR %d commit statuses: %w", pull.Number, err))
+			continue
+		}
+		failure := detectCIFailure(checkRuns, statuses)
+		if failure != nil && !failure.OccurredAt.IsZero() &&
+			failure.OccurredAt.Before(now.Add(-d.cfg.BootstrapLookback.Duration)) {
+			d.logger.Info("CI failure ignored outside bootstrap lookback", "repo", repository.GitHub,
+				"pr", pull.Number, "issue", issueKey, "head_sha", pull.HeadSHA,
+				"check", failure.Name, "state", failure.State, "source", failure.Source,
+				"occurred_at", failure.OccurredAt)
+			failure = nil
+		}
+		if dryRun {
+			if failure != nil {
+				d.logger.Info("dry-run CI failure", "repo", repository.GitHub, "pr", pull.Number,
+					"issue", issueKey, "head_sha", pull.HeadSHA, "check", failure.Name,
+					"state", failure.State, "source", failure.Source)
+			}
+			continue
+		}
+		var input *state.CIFailureInput
+		if failure != nil {
+			occurredAt := failure.OccurredAt
+			if occurredAt.IsZero() {
+				occurredAt = now
+			}
+			failureURL := strings.TrimSpace(failure.URL)
+			if failureURL == "" {
+				failureURL = pull.HTMLURL + "/checks"
+			}
+			input = &state.CIFailureInput{
+				Repo: repository.GitHub, EventID: fmt.Sprintf("%d@%s", pull.Number, pull.HeadSHA),
+				PullNumber: pull.Number, HeadSHA: pull.HeadSHA, IssueKey: issueKey,
+				Body: fmt.Sprintf("%s: %s", failure.Name, failure.State), OccurredAt: occurredAt,
+				Metadata: map[string]any{
+					"url": failureURL, "check_name": failure.Name, "state": failure.State,
+					"source": failure.Source, "head_sha": pull.HeadSHA,
+				},
+			}
+		}
+		inserted, err := d.store.RecordCIPoll(ctx, repository.GitHub, pull.Number, pull.HeadSHA, now, input)
+		if err != nil {
+			laneErrors = append(laneErrors, fmt.Errorf("PR %d record CI poll: %w", pull.Number, err))
+			continue
+		}
+		if inserted {
+			d.logger.Info("CI failure ingested", "repo", repository.GitHub, "pr", pull.Number,
+				"issue", issueKey, "head_sha", pull.HeadSHA, "check", failure.Name,
+				"state", failure.State, "source", failure.Source)
+		}
+	}
+	return errors.Join(laneErrors...)
+}
+
+func detectCIFailure(checkRuns []gh.CheckRun, statuses []gh.CommitStatus) *detectedCIFailure {
+	var candidates []detectedCIFailure
+	failureConclusions := map[string]struct{}{
+		"failure": {}, "timed_out": {}, "action_required": {}, "startup_failure": {},
+	}
+	for _, check := range checkRuns {
+		conclusion := strings.ToLower(check.Conclusion)
+		if _, failed := failureConclusions[conclusion]; !failed {
+			continue
+		}
+		candidates = append(candidates, detectedCIFailure{
+			Name: check.Name, State: conclusion, Source: "check_run",
+			URL: check.HTMLURL, OccurredAt: check.CompletedAt,
+		})
+	}
+	latestByContext := map[string]gh.CommitStatus{}
+	for _, status := range statuses {
+		contextKey := strings.ToLower(status.Context)
+		latest, seen := latestByContext[contextKey]
+		if !seen || status.UpdatedAt.After(latest.UpdatedAt) {
+			latestByContext[contextKey] = status
+		}
+	}
+	for _, status := range latestByContext {
+		stateValue := strings.ToLower(status.State)
+		if stateValue != "failure" && stateValue != "error" {
+			continue
+		}
+		candidates = append(candidates, detectedCIFailure{
+			Name: status.Context, State: stateValue, Source: "commit_status",
+			URL: status.TargetURL, OccurredAt: status.UpdatedAt,
+		})
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].OccurredAt.After(candidates[j].OccurredAt)
+	})
+	return &candidates[0]
+}
+
 func (d *Dispatcher) queueFeedback(ctx context.Context) error {
 	items, err := d.store.PendingFeedback(ctx, 100)
 	if err != nil {
@@ -343,7 +479,7 @@ func (d *Dispatcher) queueFeedback(ctx context.Context) error {
 		}
 		marker, body := feedbackMessage(item, mention)
 		outbox := state.OutboxInput{
-			EventKey: fmt.Sprintf("%s:%s:%d", item.Kind, item.Repo, item.EventID),
+			EventKey: fmt.Sprintf("%s:%s:%s", item.Kind, item.Repo, item.EventID),
 			Kind:     item.Kind, IssueKey: item.IssueKey, Body: body, Marker: marker,
 		}
 		if err := d.store.QueueFeedback(ctx, item, outbox); err != nil {
@@ -726,22 +862,27 @@ func truncateRunes(value string, limit int) string {
 func feedbackMessage(item state.PendingFeedback, mention string) (string, string) {
 	markerKind := "github-review-comment-dispatch"
 	idName := "comment"
+	prompt := "有新的 Review 意见"
 	if item.Kind == "review" {
 		markerKind = "github-review-dispatch"
 		idName = "review"
+	} else if item.Kind == "ci_failure" {
+		markerKind = "github-ci-failure-dispatch"
+		idName = "event"
+		prompt = "CI 失败"
 	}
-	marker := fmt.Sprintf("<!-- %s:v1 repo=%s %s=%d -->", markerKind, item.Repo, idName, item.EventID)
+	marker := fmt.Sprintf("<!-- %s:v1 repo=%s %s=%s -->", markerKind, item.Repo, idName, item.EventID)
 	url := strings.TrimSpace(stringMetadata(item.Metadata, "url"))
 	if url == "" {
 		url = fmt.Sprintf("https://github.com/%s/pull/%d", item.Repo, item.PullNumber)
 	}
 	body := fmt.Sprintf(`%s
 
-PR %s#%d 有新的 Review 意见，请打开 GitHub 链接查看并处理：
+PR %s#%d %s，请打开 GitHub 链接查看并处理：
 
 %s
 
-%s`, mention, item.Repo, item.PullNumber, url, marker)
+%s`, mention, item.Repo, item.PullNumber, prompt, url, marker)
 	return marker, body
 }
 

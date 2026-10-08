@@ -169,10 +169,11 @@ function renderFeedback(items) {
     item.delivery_status,
   ));
   setText("feedback-count", filtered.length);
-  setEmptyState("feedback-empty", filtered.length, items.length, "还没有 review comment 回流。", "没有匹配的 review feedback。");
+  setEmptyState("feedback-empty", filtered.length, items.length, "还没有 review 或 CI feedback。", "没有匹配的 feedback。");
   for (const item of filtered) {
     const wrapper = node("article", "event");
-    const icon = node("div", "event-icon", item.kind === "review" ? "RV" : "CM");
+    const iconText = item.kind === "ci_failure" ? "CI" : (item.kind === "review" ? "RV" : "CM");
+    const icon = node("div", "event-icon", iconText);
     const content = node("div");
     const title = node("p", "event-title");
     const link = node("a", "external", `${item.repo} #${item.pull_number}`);
@@ -180,7 +181,9 @@ function renderFeedback(items) {
     link.target = "_blank";
     link.rel = "noreferrer";
     title.append(link, document.createTextNode(` → ${item.issue_key}`));
-    const location = item.path ? `${item.path}${item.line ? `:${item.line}` : ""}` : "review submission";
+    const location = item.kind === "ci_failure"
+      ? "CI check"
+      : (item.path ? `${item.path}${item.line ? `:${item.line}` : ""}` : "review submission");
     const copy = node("p", "event-copy", `${item.author || "unknown"} · ${location} · ${item.body_summary || "No body"}`);
     const delivery = badge(item.delivery_status || item.status);
     content.append(title, copy, delivery);

@@ -53,10 +53,21 @@ type FeedbackInput struct {
 	OccurredAt time.Time
 }
 
+type CIFailureInput struct {
+	Repo       string
+	EventID    string
+	PullNumber int
+	HeadSHA    string
+	IssueKey   string
+	Body       string
+	Metadata   map[string]any
+	OccurredAt time.Time
+}
+
 type PendingFeedback struct {
 	Kind       string
 	Repo       string
-	EventID    int64
+	EventID    string
 	PullNumber int
 	IssueKey   string
 	Body       string
@@ -68,6 +79,7 @@ type Status struct {
 	Rounds         int               `json:"rounds"`
 	ReviewComments map[string]int    `json:"review_comments"`
 	Reviews        map[string]int    `json:"reviews"`
+	CIFailures     map[string]int    `json:"ci_failures"`
 	Outbox         map[string]int    `json:"outbox"`
 	Cursors        map[string]string `json:"cursors"`
 }
@@ -110,7 +122,7 @@ type DashboardRound struct {
 type DashboardFeedback struct {
 	Kind           string `json:"kind"`
 	Repo           string `json:"repo"`
-	EventID        int64  `json:"event_id"`
+	EventID        string `json:"event_id"`
 	PullNumber     int    `json:"pull_number"`
 	IssueKey       string `json:"issue_key"`
 	Author         string `json:"author,omitempty"`
@@ -257,6 +269,30 @@ func (s *Store) migrate(ctx context.Context) error {
 			updated_at TEXT NOT NULL,
 			PRIMARY KEY (repo, review_id)
 		)`,
+		`CREATE TABLE IF NOT EXISTS ci_failures (
+			repo TEXT NOT NULL,
+			event_id TEXT NOT NULL,
+			pr_number INTEGER NOT NULL,
+			head_sha TEXT NOT NULL,
+			issue_key TEXT NOT NULL,
+			body TEXT NOT NULL,
+			metadata_json TEXT NOT NULL,
+			occurred_at TEXT NOT NULL,
+			status TEXT NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			next_attempt_at TEXT,
+			last_error TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (repo, event_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS ci_poll_state (
+			repo TEXT NOT NULL,
+			pr_number INTEGER NOT NULL,
+			head_sha TEXT NOT NULL,
+			last_success_at TEXT NOT NULL,
+			PRIMARY KEY (repo, pr_number, head_sha)
+		)`,
 		`CREATE TABLE IF NOT EXISTS outbox (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			event_key TEXT NOT NULL UNIQUE,
@@ -293,6 +329,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_review_comments_pending ON review_comments(status, next_attempt_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_reviews_pending ON reviews(status, next_attempt_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_ci_failures_pending ON ci_failures(status, next_attempt_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox(status, next_attempt_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_poll_runs_started ON poll_runs(started_at DESC)`,
 	}
@@ -429,19 +466,76 @@ func (s *Store) AdvanceCursor(ctx context.Context, repo, stream string, cursor t
 	return err
 }
 
+func (s *Store) CIPollDue(ctx context.Context, repo string, pullNumber int, headSHA string, now time.Time, interval time.Duration) (bool, error) {
+	var value string
+	err := s.db.QueryRowContext(ctx, `SELECT last_success_at FROM ci_poll_state
+		WHERE repo=? AND pr_number=? AND head_sha=?`, repo, pullNumber, headSHA).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	lastSuccess, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return false, fmt.Errorf("parse CI poll timestamp: %w", err)
+	}
+	return !now.Before(lastSuccess.Add(interval)), nil
+}
+
+func (s *Store) RecordCIPoll(ctx context.Context, repo string, pullNumber int, headSHA string, checkedAt time.Time, failure *CIFailureInput) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	now := timestamp(time.Now())
+	inserted := false
+	if failure != nil {
+		metadata, err := json.Marshal(failure.Metadata)
+		if err != nil {
+			return false, err
+		}
+		result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO ci_failures
+			(repo, event_id, pr_number, head_sha, issue_key, body, metadata_json,
+			 occurred_at, status, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+			failure.Repo, failure.EventID, failure.PullNumber, failure.HeadSHA,
+			failure.IssueKey, failure.Body, string(metadata), timestamp(failure.OccurredAt), now, now)
+		if err != nil {
+			return false, err
+		}
+		rows, _ := result.RowsAffected()
+		inserted = rows > 0
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO ci_poll_state(repo, pr_number, head_sha, last_success_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(repo, pr_number, head_sha) DO UPDATE SET last_success_at=excluded.last_success_at`,
+		repo, pullNumber, headSHA, timestamp(checkedAt)); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return inserted, nil
+}
+
 func (s *Store) PendingFeedback(ctx context.Context, limit int) ([]PendingFeedback, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	now := timestamp(time.Now())
 	query := `SELECT kind, repo, event_id, pr_number, issue_key, body, metadata_json, attempts FROM (
-		SELECT 'review_comment' AS kind, repo, comment_id AS event_id, pr_number, issue_key, body, metadata_json, attempts, occurred_at
+		SELECT 'review_comment' AS kind, repo, CAST(comment_id AS TEXT) AS event_id, pr_number, issue_key, body, metadata_json, attempts, occurred_at
 		FROM review_comments WHERE status='pending' AND (next_attempt_at IS NULL OR next_attempt_at<=?)
 		UNION ALL
-		SELECT 'review' AS kind, repo, review_id AS event_id, pr_number, issue_key, body, metadata_json, attempts, occurred_at
+		SELECT 'review' AS kind, repo, CAST(review_id AS TEXT) AS event_id, pr_number, issue_key, body, metadata_json, attempts, occurred_at
 		FROM reviews WHERE status='pending' AND (next_attempt_at IS NULL OR next_attempt_at<=?)
+		UNION ALL
+		SELECT 'ci_failure' AS kind, repo, event_id, pr_number, issue_key, body, metadata_json, attempts, occurred_at
+		FROM ci_failures WHERE status='pending' AND (next_attempt_at IS NULL OR next_attempt_at<=?)
 	) ORDER BY occurred_at ASC LIMIT ?`
-	rows, err := s.db.QueryContext(ctx, query, now, now, limit)
+	rows, err := s.db.QueryContext(ctx, query, now, now, now, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -554,7 +648,7 @@ func (s *Store) RetryOutbox(ctx context.Context, id int64, message string, delay
 
 func (s *Store) Status(ctx context.Context) (Status, error) {
 	result := Status{
-		ReviewComments: map[string]int{}, Reviews: map[string]int{},
+		ReviewComments: map[string]int{}, Reviews: map[string]int{}, CIFailures: map[string]int{},
 		Outbox: map[string]int{}, Cursors: map[string]string{},
 	}
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pr_rounds`).Scan(&result.Rounds); err != nil {
@@ -564,6 +658,9 @@ func (s *Store) Status(ctx context.Context) (Status, error) {
 		return result, err
 	}
 	if err := statusCounts(ctx, s.db, "reviews", result.Reviews); err != nil {
+		return result, err
+	}
+	if err := statusCounts(ctx, s.db, "ci_failures", result.CIFailures); err != nil {
 		return result, err
 	}
 	if err := statusCounts(ctx, s.db, "outbox", result.Outbox); err != nil {
@@ -715,13 +812,14 @@ func (s *Store) dashboardSummary(ctx context.Context) (DashboardSummary, error) 
 	var result DashboardSummary
 	err := s.db.QueryRowContext(ctx, `SELECT
 		(SELECT COUNT(DISTINCT repo) FROM (
-			SELECT repo FROM pr_rounds UNION SELECT repo FROM review_comments UNION SELECT repo FROM reviews
+			SELECT repo FROM pr_rounds UNION SELECT repo FROM review_comments UNION SELECT repo FROM reviews UNION SELECT repo FROM ci_failures
 		)),
 		(SELECT COUNT(*) FROM pr_rounds),
-		(SELECT COUNT(*) FROM review_comments) + (SELECT COUNT(*) FROM reviews),
+		(SELECT COUNT(*) FROM review_comments) + (SELECT COUNT(*) FROM reviews) + (SELECT COUNT(*) FROM ci_failures),
 		(SELECT COUNT(*) FROM outbox WHERE status='pending'),
 		(SELECT COUNT(*) FROM review_comments WHERE status='permanent_error') +
 		(SELECT COUNT(*) FROM reviews WHERE status='permanent_error') +
+		(SELECT COUNT(*) FROM ci_failures WHERE status='permanent_error') +
 		(SELECT COUNT(*) FROM outbox WHERE last_error!='')`).Scan(
 		&result.Repositories, &result.Rounds, &result.Feedback,
 		&result.PendingDeliveries, &result.Failures)
@@ -836,13 +934,17 @@ func (s *Store) dashboardFeedback(ctx context.Context, limit int) ([]DashboardFe
 		COALESCE((SELECT o.status FROM outbox o
 			WHERE o.event_key=f.kind || ':' || f.repo || ':' || f.event_id LIMIT 1), '')
 		FROM (
-			SELECT 'review_comment' AS kind, repo, comment_id AS event_id, pr_number,
+			SELECT 'review_comment' AS kind, repo, CAST(comment_id AS TEXT) AS event_id, pr_number,
 				issue_key, body, metadata_json, status, attempts, last_error, occurred_at, updated_at
 			FROM review_comments
 			UNION ALL
-			SELECT 'review' AS kind, repo, review_id AS event_id, pr_number,
+			SELECT 'review' AS kind, repo, CAST(review_id AS TEXT) AS event_id, pr_number,
 				issue_key, body, metadata_json, status, attempts, last_error, occurred_at, updated_at
 			FROM reviews
+			UNION ALL
+			SELECT 'ci_failure' AS kind, repo, event_id, pr_number,
+				issue_key, body, metadata_json, status, attempts, last_error, occurred_at, updated_at
+			FROM ci_failures
 		) f ORDER BY f.occurred_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -862,6 +964,9 @@ func (s *Store) dashboardFeedback(ctx context.Context, limit int) ([]DashboardFe
 			return nil, err
 		}
 		item.Author = stringFromMetadata(values, "author")
+		if item.Kind == "ci_failure" && item.Author == "" {
+			item.Author = stringFromMetadata(values, "check_name")
+		}
 		item.URL = stringFromMetadata(values, "url")
 		item.Path = stringFromMetadata(values, "path")
 		item.Line = stringFromMetadata(values, "line")
@@ -977,13 +1082,15 @@ func feedbackTable(kind string) (string, string, error) {
 		return "review_comments", "comment_id", nil
 	case "review":
 		return "reviews", "review_id", nil
+	case "ci_failure":
+		return "ci_failures", "event_id", nil
 	default:
 		return "", "", fmt.Errorf("unsupported feedback kind %q", kind)
 	}
 }
 
 func statusCounts(ctx context.Context, db *sql.DB, table string, target map[string]int) error {
-	if table != "review_comments" && table != "reviews" && table != "outbox" {
+	if table != "review_comments" && table != "reviews" && table != "ci_failures" && table != "outbox" {
 		return errors.New("unsupported status table")
 	}
 	rows, err := db.QueryContext(ctx, fmt.Sprintf(`SELECT status, COUNT(*) FROM %s GROUP BY status`, table))

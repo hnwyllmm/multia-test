@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -101,6 +102,25 @@ func TestReviewerScoreStable(t *testing.T) {
 	}
 }
 
+func TestDetectCIFailureUsesLatestStatuses(t *testing.T) {
+	now := time.Now()
+	failure := detectCIFailure([]gh.CheckRun{{
+		Name: "build", Conclusion: "failure", HTMLURL: "https://example/check", CompletedAt: now,
+	}}, []gh.CommitStatus{
+		{Context: "legacy", State: "success", UpdatedAt: now},
+		{Context: "legacy", State: "failure", UpdatedAt: now.Add(-time.Minute)},
+	})
+	if failure == nil || failure.Name != "build" || failure.Source != "check_run" {
+		t.Fatalf("unexpected failure %+v", failure)
+	}
+	if got := detectCIFailure(nil, []gh.CommitStatus{
+		{Context: "legacy", State: "failure", UpdatedAt: now.Add(-time.Minute)},
+		{Context: "legacy", State: "success", UpdatedAt: now},
+	}); got != nil {
+		t.Fatalf("obsolete out-of-order commit status failure was selected: %+v", got)
+	}
+}
+
 func TestEligiblePullsUseBaseBranchPolicy(t *testing.T) {
 	repository := config.Repository{TargetBranches: []string{"master", "release/**"}}
 	pulls := []gh.PullRequest{
@@ -188,7 +208,7 @@ func TestReviewRequestPayloadSupportsOptionalIssueContext(t *testing.T) {
 func TestFeedbackMessageLinksWithoutCopyingBody(t *testing.T) {
 	rawBody := "[P1] keep $() and `ticks` verbatim\n\n<!-- automated-review-finding:v1 fingerprint=abc -->"
 	marker, body := feedbackMessage(state.PendingFeedback{
-		Kind: "review_comment", Repo: "owner/repo", EventID: 99,
+		Kind: "review_comment", Repo: "owner/repo", EventID: "99",
 		PullNumber: 3, Body: rawBody,
 		Metadata: map[string]any{"author": "alice", "url": "https://example", "path": "a.go", "line": float64(8)},
 	}, "[@Worker](mention://agent/id)")
@@ -203,7 +223,7 @@ func TestFeedbackMessageLinksWithoutCopyingBody(t *testing.T) {
 
 func TestFeedbackMessageFallsBackToPullURL(t *testing.T) {
 	_, body := feedbackMessage(state.PendingFeedback{
-		Kind: "review", Repo: "owner/repo", EventID: 100, PullNumber: 4,
+		Kind: "review", Repo: "owner/repo", EventID: "100", PullNumber: 4,
 	}, "[@Worker](mention://agent/id)")
 	if !strings.Contains(body, "https://github.com/owner/repo/pull/4") {
 		t.Fatalf("feedback has no usable fallback URL: %s", body)
@@ -388,6 +408,87 @@ func TestDisabledReviewDispatchStillNotifiesIssueForUnmarkedComment(t *testing.T
 	}
 	if dashboard.Summary.Rounds != 0 || dashboard.Summary.Feedback != 1 || len(dashboard.Feedback) != 1 || dashboard.Feedback[0].DeliveryStatus != "delivered" {
 		t.Fatalf("unexpected dashboard state %+v", dashboard)
+	}
+}
+
+func TestCIFailureNotifiesIssueOncePerHead(t *testing.T) {
+	t.Setenv("TEST_GITHUB_TOKEN", "github-token")
+	now := time.Now().UTC().Truncate(time.Second)
+	var checkCalls int
+	githubAPI := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/repos/owner/repo/pulls":
+			_, _ = fmt.Fprintf(writer, `[{"number":9,"title":"[SEEK-9] Fix race","body":"","html_url":"https://github.com/owner/repo/pull/9","state":"open","draft":false,"head":{"sha":"head-sha","ref":"feature"},"base":{"sha":"base-sha","ref":"master"},"created_at":%q,"updated_at":%q,"user":{"login":"alice"}}]`, now.Format(time.RFC3339), now.Format(time.RFC3339))
+		case "/repos/owner/repo/pulls/comments":
+			_, _ = io.WriteString(writer, `[]`)
+		case "/repos/owner/repo/commits/head-sha/check-runs":
+			checkCalls++
+			_, _ = fmt.Fprintf(writer, `{"total_count":1,"check_runs":[{"id":77,"name":"build","status":"completed","conclusion":"failure","html_url":"https://github.com/owner/repo/actions/runs/77","started_at":%q,"completed_at":%q}]}`, now.Add(-time.Minute).Format(time.RFC3339), now.Format(time.RFC3339))
+		case "/repos/owner/repo/commits/head-sha/statuses":
+			_, _ = io.WriteString(writer, `[]`)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer githubAPI.Close()
+	githubClient, err := gh.New(config.GitHubConfig{
+		APIBaseURL: githubAPI.URL,
+		Auth:       config.SecretRef{Type: "env", Name: "TEST_GITHUB_TOKEN"},
+		Proxy: config.ProxyConfig{
+			Type: "none", RequestTimeout: config.Duration{Duration: time.Second},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := false
+	cfg := &config.Config{
+		BootstrapLookback: config.Duration{Duration: 24 * time.Hour},
+		CIPollInterval:    config.Duration{Duration: 2 * time.Minute},
+		Multica:           config.MulticaConfig{Prefix: "SEEK"},
+		ReviewDispatch:    config.ReviewDispatchConfig{Enabled: &enabled},
+		Repositories: []config.Repository{{
+			GitHub: "owner/repo", TargetBranches: []string{"master", "release/**"},
+			ReviewCommentMode: "all", FindingMarker: "automated-review-finding:v1",
+			ProcessCIFailures: true,
+		}},
+	}
+	store, err := state.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	multicaClient := &fakeMulticaClient{
+		agents: []multica.Agent{{ID: "worker", Name: "Test Worker"}},
+		issue: &multica.Issue{
+			ID: "issue-id", Identifier: "SEEK-9", Status: "in_progress",
+			AssigneeType: "agent", AssigneeID: "worker",
+		},
+	}
+	worker := New(cfg, githubClient, multicaClient, nil, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	worker.now = func() time.Time { return now }
+	if err := worker.Once(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.Once(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if checkCalls != 1 {
+		t.Fatalf("check calls=%d, want 1 before CI poll interval", checkCalls)
+	}
+	if len(multicaClient.addedComments) != 1 {
+		t.Fatalf("notifications=%d, want 1", len(multicaClient.addedComments))
+	}
+	notification := multicaClient.addedComments[0]
+	if !strings.Contains(notification, "CI 失败") ||
+		!strings.Contains(notification, "https://github.com/owner/repo/actions/runs/77") ||
+		strings.Contains(notification, "build: failure") {
+		t.Fatalf("unexpected notification %q", notification)
+	}
+	status, err := store.Status(context.Background())
+	if err != nil || status.CIFailures["queued"] != 1 || status.Outbox["delivered"] != 1 {
+		t.Fatalf("status=%+v err=%v", status, err)
 	}
 }
 

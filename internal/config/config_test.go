@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSecretRefEnvironment(t *testing.T) {
@@ -121,6 +122,9 @@ func TestDashboardDefaultsToLoopback(t *testing.T) {
 	}
 	if cfg.Dashboard.RefreshInterval.Duration.String() != "10s" {
 		t.Fatalf("unexpected refresh interval %s", cfg.Dashboard.RefreshInterval.Duration)
+	}
+	if cfg.CIPollInterval.Duration != 2*time.Minute {
+		t.Fatalf("unexpected CI poll interval %s", cfg.CIPollInterval.Duration)
 	}
 }
 
