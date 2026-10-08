@@ -14,8 +14,9 @@ It runs two independent polling lanes:
    assignee. This lane does not depend on the PR having been dispatched for
    review by this service.
 
-The service never exposes an HTTP port. GitHub is read through its REST API;
-Multica writes are performed by the `multica` CLI.
+The dispatcher never exposes an HTTP port. GitHub is read through its REST API;
+Multica writes are performed by the `multica` CLI. An optional read-only
+dashboard is a separate process bound to loopback only.
 
 ## Build and test
 
@@ -73,6 +74,7 @@ Create a private environment file from
 multica-github-dispatcher once --config /path/to/config.yaml --dry-run
 multica-github-dispatcher once --config /path/to/config.yaml
 multica-github-dispatcher run --config /path/to/config.yaml
+multica-github-dispatcher dashboard --config /path/to/config.yaml
 multica-github-dispatcher status --config /path/to/config.yaml
 ```
 
@@ -87,6 +89,23 @@ or `review.id`, so editing a previously processed comment does not re-trigger
 work. A five-minute overlap on the per-repository review-comment cursor avoids
 boundary loss. Multica comments carry HTML markers; the outbox checks those
 markers before retries to prevent duplicate mentions after an ambiguous write.
+
+## Read-only dashboard
+
+The dashboard shows repository and PR review rounds, linked Multica issues,
+GitHub feedback, delivery retries, cursors, and recent poll health. It reads
+SQLite directly and does not require GitHub or Multica credentials.
+
+The listener must be a loopback address. To open the dev-host dashboard from a
+workstation:
+
+```bash
+ssh -N -L 8787:127.0.0.1:8787 dev
+```
+
+Then open `http://127.0.0.1:8787`. The UI auto-refreshes and exposes only a
+read-only JSON endpoint. External comment bodies are truncated and rendered as
+text, and security headers prevent third-party scripts and framing.
 
 ## OCR reviewer runtime
 
@@ -106,11 +125,14 @@ worker instruction templates are in [`deploy/agent-instructions`](deploy/agent-i
 ## Deployment
 
 [`deploy/multica-github-dispatcher.service`](deploy/multica-github-dispatcher.service)
-is a user-service template for the dev host. It has no inbound socket, restarts
-on failure, logs JSON to journald, and uses a process lock next to the database.
+and [`deploy/multica-github-dashboard.service`](deploy/multica-github-dashboard.service)
+are user-service templates for the dev host. Both restart on failure and log to
+journald. The dispatcher uses a process lock next to the database; the dashboard
+is read-only and listens only on `127.0.0.1`.
 
 ```bash
 systemctl --user daemon-reload
 systemctl --user enable --now multica-github-dispatcher.service
+systemctl --user enable --now multica-github-dashboard.service
 journalctl --user -u multica-github-dispatcher.service -f
 ```

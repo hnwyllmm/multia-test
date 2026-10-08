@@ -108,3 +108,57 @@ state_db: /tmp/state.db
 		t.Fatalf("expected unknown field error, got %v", err)
 	}
 }
+
+func TestDashboardDefaultsToLoopback(t *testing.T) {
+	cfg := validTestConfig(t, "")
+	if cfg.Dashboard.Listen != "127.0.0.1:8787" {
+		t.Fatalf("unexpected dashboard address %q", cfg.Dashboard.Listen)
+	}
+	if cfg.Dashboard.RefreshInterval.Duration.String() != "10s" {
+		t.Fatalf("unexpected refresh interval %s", cfg.Dashboard.RefreshInterval.Duration)
+	}
+}
+
+func TestDashboardRejectsNonLoopbackListener(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := validConfigYAML("dashboard:\n  listen: 0.0.0.0:8787\n")
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("expected loopback validation error, got %v", err)
+	}
+}
+
+func validTestConfig(t *testing.T, dashboard string) *Config {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(validConfigYAML(dashboard)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func validConfigYAML(dashboard string) string {
+	return `poll_interval: 1m
+bootstrap_lookback: 24h
+github:
+  auth: {type: env, name: GITHUB_TOKEN}
+  proxy: {type: none}
+multica:
+  server_url_env: MULTICA_SERVER_URL
+  workspace_id: workspace
+  workspace_prefix: WANG
+  auth: {type: env, name: MULTICA_TOKEN}
+` + dashboard + `repositories:
+  - github: owner/repo
+    reviewer_squad_id: squad
+    reviewer_count: 1
+    ocr_version: 1.12.8
+state_db: /tmp/state.db
+`
+}

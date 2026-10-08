@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/hnwyllmm/multia-test/internal/config"
+	"github.com/hnwyllmm/multia-test/internal/dashboard"
 	"github.com/hnwyllmm/multia-test/internal/dispatcher"
 	gh "github.com/hnwyllmm/multia-test/internal/github"
 	"github.com/hnwyllmm/multia-test/internal/lock"
@@ -32,7 +33,7 @@ func main() {
 
 func run(arguments []string) error {
 	if len(arguments) == 0 {
-		return errors.New("usage: multica-github-dispatcher <run|once|status|version> [flags]")
+		return errors.New("usage: multica-github-dispatcher <run|once|dashboard|status|version> [flags]")
 	}
 	command := arguments[0]
 	if command == "version" {
@@ -45,7 +46,7 @@ func run(arguments []string) error {
 	if err := flags.Parse(arguments[1:]); err != nil {
 		return err
 	}
-	if command != "run" && command != "once" && command != "status" {
+	if command != "run" && command != "once" && command != "dashboard" && command != "status" {
 		return fmt.Errorf("unknown command %q", command)
 	}
 	if *configPath == "" {
@@ -60,6 +61,9 @@ func run(arguments []string) error {
 	}
 	if command == "status" {
 		return printStatus(cfg)
+	}
+	if command == "dashboard" {
+		return serveDashboard(cfg)
 	}
 	return execute(command, *dryRun, cfg)
 }
@@ -112,11 +116,11 @@ func execute(command string, dryRun bool, cfg *config.Config) error {
 	worker := dispatcher.New(cfg, githubClient, multicaClient, store, logger)
 
 	if command == "once" {
-		return worker.Once(ctx, dryRun)
+		return pollOnce(ctx, store, worker, dryRun)
 	}
 	for {
 		started := time.Now()
-		if err := worker.Once(ctx, false); err != nil {
+		if err := pollOnce(ctx, store, worker, false); err != nil {
 			logger.Error("poll cycle completed with errors", "error", err, "duration", time.Since(started).String())
 		} else {
 			logger.Info("poll cycle complete", "duration", time.Since(started).String())
@@ -130,6 +134,33 @@ func execute(command string, dryRun bool, cfg *config.Config) error {
 		case <-timer.C:
 		}
 	}
+}
+
+func pollOnce(ctx context.Context, store *state.Store, worker *dispatcher.Dispatcher, dryRun bool) error {
+	runID, err := store.BeginPoll(ctx)
+	if err != nil {
+		return fmt.Errorf("record poll start: %w", err)
+	}
+	runErr := worker.Once(ctx, dryRun)
+	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	finishErr := store.FinishPoll(finishCtx, runID, runErr)
+	if finishErr != nil {
+		finishErr = fmt.Errorf("record poll completion: %w", finishErr)
+	}
+	return errors.Join(runErr, finishErr)
+}
+
+func serveDashboard(cfg *config.Config) error {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	store, err := state.Open(cfg.StateDB)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	return dashboard.New(store, cfg, version, logger).Serve(ctx)
 }
 
 func printStatus(cfg *config.Config) error {

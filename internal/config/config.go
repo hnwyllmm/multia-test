@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -114,6 +115,11 @@ type MulticaConfig struct {
 	Auth         SecretRef `yaml:"auth"`
 }
 
+type DashboardConfig struct {
+	Listen          string   `yaml:"listen"`
+	RefreshInterval Duration `yaml:"refresh_interval"`
+}
+
 type Repository struct {
 	GitHub                  string `yaml:"github"`
 	ReviewerSquadID         string `yaml:"reviewer_squad_id"`
@@ -134,12 +140,13 @@ func (r Repository) OwnerRepo() (string, string, error) {
 }
 
 type Config struct {
-	PollInterval      Duration      `yaml:"poll_interval"`
-	BootstrapLookback Duration      `yaml:"bootstrap_lookback"`
-	GitHub            GitHubConfig  `yaml:"github"`
-	Multica           MulticaConfig `yaml:"multica"`
-	Repositories      []Repository  `yaml:"repositories"`
-	StateDB           string        `yaml:"state_db"`
+	PollInterval      Duration        `yaml:"poll_interval"`
+	BootstrapLookback Duration        `yaml:"bootstrap_lookback"`
+	GitHub            GitHubConfig    `yaml:"github"`
+	Multica           MulticaConfig   `yaml:"multica"`
+	Dashboard         DashboardConfig `yaml:"dashboard"`
+	Repositories      []Repository    `yaml:"repositories"`
+	StateDB           string          `yaml:"state_db"`
 }
 
 func Load(path string) (*Config, error) {
@@ -194,6 +201,22 @@ func (c *Config) setDefaultsAndValidate() error {
 	}
 	if err := c.Multica.Auth.Validate("multica.auth"); err != nil {
 		return err
+	}
+	if c.Dashboard.Listen == "" {
+		c.Dashboard.Listen = "127.0.0.1:8787"
+	}
+	host, port, err := net.SplitHostPort(c.Dashboard.Listen)
+	if err != nil || port == "" {
+		return errors.New("dashboard.listen must be a host:port address")
+	}
+	if host != "localhost" {
+		ip := net.ParseIP(host)
+		if ip == nil || !ip.IsLoopback() {
+			return errors.New("dashboard.listen must use a loopback address; use SSH port forwarding for remote access")
+		}
+	}
+	if c.Dashboard.RefreshInterval.Duration == 0 {
+		c.Dashboard.RefreshInterval.Duration = 10 * time.Second
 	}
 	if len(c.Repositories) == 0 {
 		return errors.New("at least one repository is required")

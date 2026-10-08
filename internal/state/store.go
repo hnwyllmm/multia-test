@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -69,6 +70,85 @@ type Status struct {
 	Reviews        map[string]int    `json:"reviews"`
 	Outbox         map[string]int    `json:"outbox"`
 	Cursors        map[string]string `json:"cursors"`
+}
+
+type DashboardSummary struct {
+	Repositories      int `json:"repositories"`
+	Rounds            int `json:"rounds"`
+	Feedback          int `json:"feedback"`
+	PendingDeliveries int `json:"pending_deliveries"`
+	Failures          int `json:"failures"`
+}
+
+type DashboardCursor struct {
+	Repo          string `json:"repo"`
+	Stream        string `json:"stream"`
+	LastSuccessAt string `json:"last_success_at"`
+}
+
+type DashboardRound struct {
+	Repo          string   `json:"repo"`
+	PullNumber    int      `json:"pull_number"`
+	HeadSHA       string   `json:"head_sha"`
+	BaseSHA       string   `json:"base_sha"`
+	IssueKey      string   `json:"issue_key"`
+	ReviewerIDs   []string `json:"reviewer_ids"`
+	Status        string   `json:"status"`
+	LastError     string   `json:"last_error,omitempty"`
+	CreatedAt     string   `json:"created_at"`
+	UpdatedAt     string   `json:"updated_at"`
+	DeliveryTotal int      `json:"delivery_total"`
+	Delivered     int      `json:"delivered"`
+}
+
+type DashboardFeedback struct {
+	Kind           string `json:"kind"`
+	Repo           string `json:"repo"`
+	EventID        int64  `json:"event_id"`
+	PullNumber     int    `json:"pull_number"`
+	IssueKey       string `json:"issue_key"`
+	Author         string `json:"author,omitempty"`
+	URL            string `json:"url,omitempty"`
+	Path           string `json:"path,omitempty"`
+	Line           string `json:"line,omitempty"`
+	BodySummary    string `json:"body_summary,omitempty"`
+	Status         string `json:"status"`
+	DeliveryStatus string `json:"delivery_status,omitempty"`
+	Attempts       int    `json:"attempts"`
+	LastError      string `json:"last_error,omitempty"`
+	OccurredAt     string `json:"occurred_at"`
+	UpdatedAt      string `json:"updated_at"`
+}
+
+type DashboardOutbox struct {
+	ID            int64  `json:"id"`
+	EventKey      string `json:"event_key"`
+	Kind          string `json:"kind"`
+	IssueKey      string `json:"issue_key"`
+	Status        string `json:"status"`
+	Attempts      int    `json:"attempts"`
+	NextAttemptAt string `json:"next_attempt_at,omitempty"`
+	LastError     string `json:"last_error,omitempty"`
+	CreatedAt     string `json:"created_at"`
+	UpdatedAt     string `json:"updated_at"`
+}
+
+type DashboardPollRun struct {
+	ID          int64  `json:"id"`
+	Status      string `json:"status"`
+	Error       string `json:"error,omitempty"`
+	StartedAt   string `json:"started_at"`
+	CompletedAt string `json:"completed_at,omitempty"`
+}
+
+type DashboardData struct {
+	GeneratedAt string              `json:"generated_at"`
+	Summary     DashboardSummary    `json:"summary"`
+	Cursors     []DashboardCursor   `json:"cursors"`
+	Rounds      []DashboardRound    `json:"rounds"`
+	Feedback    []DashboardFeedback `json:"feedback"`
+	Outbox      []DashboardOutbox   `json:"outbox"`
+	PollRuns    []DashboardPollRun  `json:"poll_runs"`
 }
 
 func Open(path string) (*Store, error) {
@@ -171,9 +251,17 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS poll_runs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			status TEXT NOT NULL,
+			error TEXT NOT NULL DEFAULT '',
+			started_at TEXT NOT NULL,
+			completed_at TEXT
+		)`,
 		`CREATE INDEX IF NOT EXISTS idx_review_comments_pending ON review_comments(status, next_attempt_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_reviews_pending ON reviews(status, next_attempt_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox(status, next_attempt_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_poll_runs_started ON poll_runs(started_at DESC)`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
@@ -450,6 +538,247 @@ func (s *Store) Status(ctx context.Context) (Status, error) {
 		result.Cursors[key] = value
 	}
 	return result, rows.Err()
+}
+
+func (s *Store) BeginPoll(ctx context.Context) (int64, error) {
+	result, err := s.db.ExecContext(ctx,
+		`INSERT INTO poll_runs(status, started_at) VALUES ('running', ?)`, timestamp(time.Now()))
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
+func (s *Store) FinishPoll(ctx context.Context, id int64, runErr error) error {
+	status := "success"
+	message := ""
+	if runErr != nil {
+		status = "error"
+		message = truncate(runErr.Error(), 1000)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE poll_runs SET status=?, error=?, completed_at=? WHERE id=?`,
+		status, message, timestamp(time.Now()), id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM poll_runs WHERE id NOT IN (SELECT id FROM poll_runs ORDER BY id DESC LIMIT 200)`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) Dashboard(ctx context.Context, limit int) (DashboardData, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	result := DashboardData{GeneratedAt: timestamp(time.Now())}
+	var err error
+	if result.Summary, err = s.dashboardSummary(ctx); err != nil {
+		return result, err
+	}
+	if result.Cursors, err = s.dashboardCursors(ctx); err != nil {
+		return result, err
+	}
+	if result.Rounds, err = s.dashboardRounds(ctx, limit); err != nil {
+		return result, err
+	}
+	if result.Feedback, err = s.dashboardFeedback(ctx, limit); err != nil {
+		return result, err
+	}
+	if result.Outbox, err = s.dashboardOutbox(ctx, limit); err != nil {
+		return result, err
+	}
+	if result.PollRuns, err = s.dashboardPollRuns(ctx, 20); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func (s *Store) dashboardSummary(ctx context.Context) (DashboardSummary, error) {
+	var result DashboardSummary
+	err := s.db.QueryRowContext(ctx, `SELECT
+		(SELECT COUNT(DISTINCT repo) FROM (
+			SELECT repo FROM pr_rounds UNION SELECT repo FROM review_comments UNION SELECT repo FROM reviews
+		)),
+		(SELECT COUNT(*) FROM pr_rounds),
+		(SELECT COUNT(*) FROM review_comments) + (SELECT COUNT(*) FROM reviews),
+		(SELECT COUNT(*) FROM outbox WHERE status!='delivered'),
+		(SELECT COUNT(*) FROM review_comments WHERE status='permanent_error') +
+		(SELECT COUNT(*) FROM reviews WHERE status='permanent_error') +
+		(SELECT COUNT(*) FROM outbox WHERE last_error!='')`).Scan(
+		&result.Repositories, &result.Rounds, &result.Feedback,
+		&result.PendingDeliveries, &result.Failures)
+	return result, err
+}
+
+func (s *Store) dashboardCursors(ctx context.Context) ([]DashboardCursor, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT repo, stream, last_success_at FROM repo_cursors ORDER BY repo, stream`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []DashboardCursor{}
+	for rows.Next() {
+		var item DashboardCursor
+		if err := rows.Scan(&item.Repo, &item.Stream, &item.LastSuccessAt); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) dashboardRounds(ctx context.Context, limit int) ([]DashboardRound, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT
+		r.repo, r.pr_number, r.head_sha, r.base_sha, r.issue_key,
+		r.reviewer_ids_json, r.status, r.last_error, r.created_at, r.updated_at,
+		(SELECT COUNT(*) FROM outbox o WHERE o.kind='review_request' AND
+			substr(o.event_key, 1, length('review-request:' || r.repo || ':' || r.pr_number || ':' || r.head_sha || ':')) =
+			'review-request:' || r.repo || ':' || r.pr_number || ':' || r.head_sha || ':'),
+		(SELECT COUNT(*) FROM outbox o WHERE o.kind='review_request' AND o.status='delivered' AND
+			substr(o.event_key, 1, length('review-request:' || r.repo || ':' || r.pr_number || ':' || r.head_sha || ':')) =
+			'review-request:' || r.repo || ':' || r.pr_number || ':' || r.head_sha || ':')
+		FROM pr_rounds r ORDER BY r.created_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []DashboardRound{}
+	for rows.Next() {
+		var item DashboardRound
+		var reviewers string
+		if err := rows.Scan(&item.Repo, &item.PullNumber, &item.HeadSHA, &item.BaseSHA,
+			&item.IssueKey, &reviewers, &item.Status, &item.LastError,
+			&item.CreatedAt, &item.UpdatedAt, &item.DeliveryTotal, &item.Delivered); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(reviewers), &item.ReviewerIDs); err != nil {
+			return nil, err
+		}
+		if item.DeliveryTotal > 0 && item.DeliveryTotal == item.Delivered {
+			item.Status = "dispatched"
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) dashboardFeedback(ctx context.Context, limit int) ([]DashboardFeedback, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT
+		f.kind, f.repo, f.event_id, f.pr_number, f.issue_key, f.body,
+		f.metadata_json, f.status, f.attempts, f.last_error, f.occurred_at, f.updated_at,
+		COALESCE((SELECT o.status FROM outbox o
+			WHERE o.event_key=f.kind || ':' || f.repo || ':' || f.event_id LIMIT 1), '')
+		FROM (
+			SELECT 'review_comment' AS kind, repo, comment_id AS event_id, pr_number,
+				issue_key, body, metadata_json, status, attempts, last_error, occurred_at, updated_at
+			FROM review_comments
+			UNION ALL
+			SELECT 'review' AS kind, repo, review_id AS event_id, pr_number,
+				issue_key, body, metadata_json, status, attempts, last_error, occurred_at, updated_at
+			FROM reviews
+		) f ORDER BY f.occurred_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []DashboardFeedback{}
+	for rows.Next() {
+		var item DashboardFeedback
+		var body, metadata string
+		if err := rows.Scan(&item.Kind, &item.Repo, &item.EventID, &item.PullNumber,
+			&item.IssueKey, &body, &metadata, &item.Status, &item.Attempts,
+			&item.LastError, &item.OccurredAt, &item.UpdatedAt, &item.DeliveryStatus); err != nil {
+			return nil, err
+		}
+		var values map[string]any
+		if err := json.Unmarshal([]byte(metadata), &values); err != nil {
+			return nil, err
+		}
+		item.Author = stringFromMetadata(values, "author")
+		item.URL = stringFromMetadata(values, "url")
+		item.Path = stringFromMetadata(values, "path")
+		item.Line = stringFromMetadata(values, "line")
+		if item.Line == "" {
+			item.Line = stringFromMetadata(values, "original_line")
+		}
+		item.BodySummary = firstMeaningfulLine(body, 180)
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) dashboardOutbox(ctx context.Context, limit int) ([]DashboardOutbox, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, event_key, kind, issue_key, status,
+		attempts, next_attempt_at, last_error, created_at, updated_at
+		FROM outbox ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []DashboardOutbox{}
+	for rows.Next() {
+		var item DashboardOutbox
+		var next sql.NullString
+		if err := rows.Scan(&item.ID, &item.EventKey, &item.Kind, &item.IssueKey,
+			&item.Status, &item.Attempts, &next, &item.LastError,
+			&item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if next.Valid {
+			item.NextAttemptAt = next.String
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) dashboardPollRuns(ctx context.Context, limit int) ([]DashboardPollRun, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, status, error, started_at, completed_at
+		FROM poll_runs ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := []DashboardPollRun{}
+	for rows.Next() {
+		var item DashboardPollRun
+		var completed sql.NullString
+		if err := rows.Scan(&item.ID, &item.Status, &item.Error, &item.StartedAt, &completed); err != nil {
+			return nil, err
+		}
+		if completed.Valid {
+			item.CompletedAt = completed.String
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func stringFromMetadata(metadata map[string]any, key string) string {
+	value := metadata[key]
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprint(value)
+}
+
+func firstMeaningfulLine(value string, limit int) string {
+	for _, line := range strings.Split(value, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		return truncate(line, limit)
+	}
+	return ""
 }
 
 func insertOutbox(ctx context.Context, tx *sql.Tx, item OutboxInput, now string) error {
