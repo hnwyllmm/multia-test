@@ -3,6 +3,7 @@ package dispatcher
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -17,6 +18,32 @@ import (
 	"github.com/hnwyllmm/multia-test/internal/reviewer"
 	"github.com/hnwyllmm/multia-test/internal/state"
 )
+
+type fakeMulticaClient struct {
+	agents   []multica.Agent
+	runtimes []multica.Runtime
+}
+
+func (f *fakeMulticaClient) GetIssue(context.Context, string) (multica.Issue, error) {
+	return multica.Issue{}, errors.New("not found")
+}
+
+func (f *fakeMulticaClient) ListAgents(context.Context) ([]multica.Agent, error) {
+	return f.agents, nil
+}
+
+func (f *fakeMulticaClient) ListRuntimes(context.Context) ([]multica.Runtime, error) {
+	return f.runtimes, nil
+}
+
+func (f *fakeMulticaClient) GetSquad(context.Context, string) (multica.Squad, error) {
+	return multica.Squad{}, errors.New("not implemented")
+}
+
+func (f *fakeMulticaClient) ListComments(context.Context, string) ([]multica.Comment, error) {
+	return nil, nil
+}
+func (f *fakeMulticaClient) AddComment(context.Context, string, string) error { return nil }
 
 func TestIssueKeyFromPull(t *testing.T) {
 	for _, test := range []struct {
@@ -52,6 +79,36 @@ func TestReviewerScoreStable(t *testing.T) {
 	second := reviewerScore("owner/repo#1@sha", "agent")
 	if first != second || first == reviewerScore("owner/repo#1@other", "agent") {
 		t.Fatal("reviewer score is not stable and input-sensitive")
+	}
+}
+
+func TestReviewerRuntimeReadinessRequiresOnlineBoundRuntime(t *testing.T) {
+	configured := []config.ReviewAgent{
+		{ID: "online", Name: "Configured Online"},
+		{ID: "offline", Name: "Configured Offline"},
+		{ID: "unbound", Name: "Configured Unbound"},
+		{ID: "missing", Name: "Configured Missing"},
+	}
+	agents := []multica.Agent{
+		{ID: "online", Name: "Online", Status: "idle", RuntimeBound: true, RuntimeID: "runtime-online"},
+		{ID: "offline", Name: "Offline", Status: "idle", RuntimeBound: true, RuntimeID: "runtime-offline"},
+		{ID: "unbound", Name: "Unbound", Status: "idle"},
+	}
+	runtimes := []multica.Runtime{
+		{ID: "runtime-online", Name: "Online runtime", Status: "online"},
+		{ID: "runtime-offline", Name: "Offline runtime", Status: "offline"},
+	}
+	items, byAgent := reviewerRuntimeReadiness(configured, agents, runtimes)
+	if len(items) != 4 {
+		t.Fatalf("readiness size=%d", len(items))
+	}
+	if !byAgent["online"].Ready || byAgent["online"].Reason != "ready" {
+		t.Fatalf("online=%+v", byAgent["online"])
+	}
+	for id, reason := range map[string]string{"offline": "runtime_offline", "unbound": "runtime_unbound", "missing": "agent_missing"} {
+		if byAgent[id].Ready || byAgent[id].Reason != reason {
+			t.Fatalf("%s=%+v, want not ready reason %s", id, byAgent[id], reason)
+		}
 	}
 }
 
@@ -186,7 +243,11 @@ func TestPullWithoutMulticaIssueDispatchesReviewOnce(t *testing.T) {
 			FindingMarker: "automated-review-finding:v1",
 		}},
 	}
-	worker := New(cfg, githubClient, nil, reviewerClient, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	multicaClient := &fakeMulticaClient{
+		agents:   []multica.Agent{{ID: "reviewer", Name: "Reviewer", Status: "idle", RuntimeBound: true, RuntimeID: "runtime"}},
+		runtimes: []multica.Runtime{{ID: "runtime", Name: "Runtime", Status: "online"}},
+	}
+	worker := New(cfg, githubClient, multicaClient, reviewerClient, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err := worker.Once(context.Background(), false); err != nil {
 		t.Fatal(err)
 	}
@@ -198,6 +259,33 @@ func TestPullWithoutMulticaIssueDispatchesReviewOnce(t *testing.T) {
 	}
 	if webhookPayload.MulticaIssue != nil || webhookPayload.PullRequest.HeadSHA != "head-sha" {
 		t.Fatalf("unexpected webhook payload %+v", webhookPayload)
+	}
+}
+
+func TestOfflineReviewerDoesNotCreateRound(t *testing.T) {
+	store, err := state.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := &config.Config{
+		ReviewDispatch: config.ReviewDispatchConfig{Agents: []config.ReviewAgent{{ID: "reviewer", Name: "Reviewer"}}},
+	}
+	client := &fakeMulticaClient{
+		agents:   []multica.Agent{{ID: "reviewer", Name: "Reviewer", Status: "idle", RuntimeBound: true, RuntimeID: "runtime"}},
+		runtimes: []multica.Runtime{{ID: "runtime", Name: "Runtime", Status: "offline"}},
+	}
+	worker := New(cfg, nil, client, nil, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	repository := config.Repository{GitHub: "owner/repo", ReviewerIDs: []string{"reviewer"}, ReviewerCount: 1}
+	if _, err := worker.selectReviewers(context.Background(), repository, nil, gh.PullRequest{Number: 3, HeadSHA: "head"}); err == nil {
+		t.Fatal("expected offline reviewer selection to fail")
+	}
+	dashboard, err := store.Dashboard(context.Background(), 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dashboard.ReviewerReadiness) != 1 || dashboard.ReviewerReadiness[0].Ready || dashboard.ReviewerReadiness[0].Reason != "runtime_offline" {
+		t.Fatalf("unexpected readiness %+v", dashboard.ReviewerReadiness)
 	}
 }
 

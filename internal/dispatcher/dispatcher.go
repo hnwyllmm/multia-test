@@ -29,14 +29,23 @@ var activeIssueStatuses = map[string]struct{}{
 type Dispatcher struct {
 	cfg      *config.Config
 	github   *gh.Client
-	multica  *multica.Client
+	multica  multicaClient
 	reviewer *reviewer.Client
 	store    *state.Store
 	logger   *slog.Logger
 	now      func() time.Time
 }
 
-func New(cfg *config.Config, github *gh.Client, multicaClient *multica.Client, reviewerClient *reviewer.Client, store *state.Store, logger *slog.Logger) *Dispatcher {
+type multicaClient interface {
+	GetIssue(context.Context, string) (multica.Issue, error)
+	ListAgents(context.Context) ([]multica.Agent, error)
+	ListRuntimes(context.Context) ([]multica.Runtime, error)
+	GetSquad(context.Context, string) (multica.Squad, error)
+	ListComments(context.Context, string) ([]multica.Comment, error)
+	AddComment(context.Context, string, string) error
+}
+
+func New(cfg *config.Config, github *gh.Client, multicaClient multicaClient, reviewerClient *reviewer.Client, store *state.Store, logger *slog.Logger) *Dispatcher {
 	return &Dispatcher{
 		cfg: cfg, github: github, multica: multicaClient,
 		reviewer: reviewerClient, store: store, logger: logger, now: time.Now,
@@ -374,7 +383,14 @@ func (d *Dispatcher) deliverOutbox(ctx context.Context) error {
 	return errors.Join(deliveryErrors...)
 }
 
-func (d *Dispatcher) selectReviewers(_ context.Context, repository config.Repository, issue *multica.Issue, pull gh.PullRequest) ([]config.ReviewAgent, error) {
+func (d *Dispatcher) selectReviewers(ctx context.Context, repository config.Repository, issue *multica.Issue, pull gh.PullRequest) ([]config.ReviewAgent, error) {
+	readiness, readinessByAgent, err := d.configuredReviewerReadiness(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := d.store.ReplaceAllReviewerReadiness(ctx, readiness); err != nil {
+		return nil, fmt.Errorf("record reviewer runtime readiness: %w", err)
+	}
 	excluded := map[string]struct{}{}
 	if issue != nil && issue.AssigneeType == "agent" && issue.AssigneeID != "" {
 		excluded[issue.AssigneeID] = struct{}{}
@@ -388,10 +404,13 @@ func (d *Dispatcher) selectReviewers(_ context.Context, repository config.Reposi
 		if !ok {
 			return nil, fmt.Errorf("reviewer %s is not configured", reviewerID)
 		}
+		if item, ok := readinessByAgent[reviewerID]; !ok || !item.Ready {
+			continue
+		}
 		candidates = append(candidates, agent)
 	}
 	if len(candidates) == 0 {
-		return nil, errors.New("repository has no eligible configured reviewers")
+		return nil, fmt.Errorf("repository has no eligible ready reviewers (%s)", reviewerReadinessSummary(readiness))
 	}
 	seed := fmt.Sprintf("%s#%d@%s", repository.GitHub, pull.Number, pull.HeadSHA)
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
@@ -415,14 +434,98 @@ func (d *Dispatcher) selectReviewers(_ context.Context, repository config.Reposi
 }
 
 func (d *Dispatcher) recordConfiguredReviewers(ctx context.Context) error {
-	items := make([]state.ReviewerReadiness, 0, len(d.cfg.ReviewDispatch.Agents))
-	for _, agent := range d.cfg.ReviewDispatch.Agents {
-		items = append(items, state.ReviewerReadiness{
-			SquadID: "review_dispatch", AgentID: agent.ID, AgentName: agent.Name,
-			Ready: true, Reason: "webhook_configured",
-		})
+	items, _, err := d.configuredReviewerReadiness(ctx)
+	if err != nil {
+		return err
 	}
 	return d.store.ReplaceAllReviewerReadiness(ctx, items)
+}
+
+func (d *Dispatcher) configuredReviewerReadiness(ctx context.Context) ([]state.ReviewerReadiness, map[string]state.ReviewerReadiness, error) {
+	if d.multica == nil {
+		return nil, nil, errors.New("Multica is unavailable for reviewer runtime readiness")
+	}
+	agents, err := d.multica.ListAgents(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list reviewer agents: %w", err)
+	}
+	runtimes, err := d.multica.ListRuntimes(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("list reviewer runtimes: %w", err)
+	}
+	items, byAgent := reviewerRuntimeReadiness(d.cfg.ReviewDispatch.Agents, agents, runtimes)
+	return items, byAgent, nil
+}
+
+func reviewerRuntimeReadiness(configured []config.ReviewAgent, agents []multica.Agent, runtimes []multica.Runtime) ([]state.ReviewerReadiness, map[string]state.ReviewerReadiness) {
+	agentByID := make(map[string]multica.Agent, len(agents))
+	for _, agent := range agents {
+		agentByID[agent.ID] = agent
+	}
+	runtimeByID := make(map[string]multica.Runtime, len(runtimes))
+	for _, runtime := range runtimes {
+		runtimeByID[runtime.ID] = runtime
+	}
+	items := make([]state.ReviewerReadiness, 0, len(configured))
+	byAgent := make(map[string]state.ReviewerReadiness, len(configured))
+	for _, configuredAgent := range configured {
+		item := state.ReviewerReadiness{SquadID: "review_dispatch", AgentID: configuredAgent.ID, AgentName: configuredAgent.Name}
+		agent, found := agentByID[configuredAgent.ID]
+		if !found {
+			item.Reason = "agent_missing"
+		} else {
+			item.AgentName = agent.Name
+			item.AgentStatus = agent.Status
+			item.RuntimeID = agent.RuntimeID
+			switch {
+			case agent.Archived:
+				item.Reason = "agent_archived"
+			case strings.EqualFold(agent.Status, "disabled"), strings.EqualFold(agent.Status, "archived"):
+				item.Reason = "agent_" + strings.ToLower(agent.Status)
+			case !agent.RuntimeBound || agent.RuntimeID == "":
+				item.Reason = "runtime_unbound"
+			default:
+				runtime, found := runtimeByID[agent.RuntimeID]
+				if !found {
+					item.Reason = "runtime_missing"
+				} else {
+					item.RuntimeName = runtime.Name
+					item.RuntimeStatus = runtime.Status
+					if strings.EqualFold(runtime.Status, "online") {
+						item.Ready = true
+						item.Reason = "ready"
+					} else if runtime.Status == "" {
+						item.Reason = "runtime_unknown"
+					} else {
+						item.Reason = "runtime_" + strings.ToLower(runtime.Status)
+					}
+				}
+			}
+		}
+		items = append(items, item)
+		byAgent[item.AgentID] = item
+	}
+	return items, byAgent
+}
+
+func reviewerReadinessSummary(items []state.ReviewerReadiness) string {
+	counts := map[string]int{}
+	for _, item := range items {
+		counts[item.Reason]++
+	}
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%d", key, counts[key]))
+	}
+	if len(parts) == 0 {
+		return "no configured reviewers"
+	}
+	return strings.Join(parts, ", ")
 }
 
 func (d *Dispatcher) assigneeMention(ctx context.Context, issue multica.Issue, agents map[string]multica.Agent) (string, error) {
