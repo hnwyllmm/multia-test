@@ -24,7 +24,12 @@ type fakeMulticaClient struct {
 	agents        []multica.Agent
 	runtimes      []multica.Runtime
 	issue         *multica.Issue
+	comments      []multica.Comment
+	runs          []multica.IssueRun
 	addedComments []string
+	rerunCalls    int
+	rerunErr      error
+	now           time.Time
 }
 
 func (f *fakeMulticaClient) GetIssue(context.Context, string) (multica.Issue, error) {
@@ -47,10 +52,33 @@ func (f *fakeMulticaClient) GetSquad(context.Context, string) (multica.Squad, er
 }
 
 func (f *fakeMulticaClient) ListComments(context.Context, string) ([]multica.Comment, error) {
-	return nil, nil
+	return f.comments, nil
 }
-func (f *fakeMulticaClient) AddComment(_ context.Context, _ string, body string) error {
+func (f *fakeMulticaClient) AddComment(_ context.Context, _ string, body string) (multica.Comment, error) {
 	f.addedComments = append(f.addedComments, body)
+	createdAt := f.now
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+	comment := multica.Comment{ID: fmt.Sprintf("comment-%d", len(f.addedComments)), Content: body, CreatedAt: createdAt}
+	f.comments = append(f.comments, comment)
+	return comment, nil
+}
+
+func (f *fakeMulticaClient) ListIssueRuns(context.Context, string) ([]multica.IssueRun, error) {
+	return f.runs, nil
+}
+
+func (f *fakeMulticaClient) RerunIssue(_ context.Context, _ string) error {
+	f.rerunCalls++
+	if f.rerunErr != nil {
+		return f.rerunErr
+	}
+	createdAt := f.now
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+	f.runs = append(f.runs, multica.IssueRun{ID: fmt.Sprintf("run-%d", f.rerunCalls), CreatedAt: createdAt})
 	return nil
 }
 
@@ -211,12 +239,12 @@ func TestFeedbackMessageLinksWithoutCopyingBody(t *testing.T) {
 		Kind: "review_comment", Repo: "owner/repo", EventID: "99",
 		PullNumber: 3, Body: rawBody,
 		Metadata: map[string]any{"author": "alice", "url": "https://example", "path": "a.go", "line": float64(8)},
-	}, "[@Worker](mention://agent/id)")
+	})
 	if !strings.Contains(body, "https://example") || !strings.Contains(body, "owner/repo#3") ||
-		!strings.Contains(body, "[@Worker](mention://agent/id)") || !strings.Contains(body, marker) {
+		!strings.Contains(body, marker) {
 		t.Fatalf("feedback notification is incomplete: %s", body)
 	}
-	if strings.Contains(body, rawBody) || strings.Contains(body, "GitHub review body") {
+	if strings.Contains(body, rawBody) || strings.Contains(body, "GitHub review body") || strings.Contains(body, "mention://") {
 		t.Fatalf("feedback copied the GitHub review body: %s", body)
 	}
 }
@@ -224,37 +252,9 @@ func TestFeedbackMessageLinksWithoutCopyingBody(t *testing.T) {
 func TestFeedbackMessageFallsBackToPullURL(t *testing.T) {
 	_, body := feedbackMessage(state.PendingFeedback{
 		Kind: "review", Repo: "owner/repo", EventID: "100", PullNumber: 4,
-	}, "[@Worker](mention://agent/id)")
+	})
 	if !strings.Contains(body, "https://github.com/owner/repo/pull/4") {
 		t.Fatalf("feedback has no usable fallback URL: %s", body)
-	}
-}
-
-func TestAssigneeMentionFallsBackToPrivateAgentID(t *testing.T) {
-	dispatcher := &Dispatcher{}
-	mention, err := dispatcher.assigneeMention(context.Background(), multica.Issue{
-		AssigneeType: "agent",
-		AssigneeID:   "private-agent-id",
-	}, map[string]multica.Agent{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if mention != "[@assigned agent](mention://agent/private-agent-id)" {
-		t.Fatalf("unexpected private-agent mention %q", mention)
-	}
-}
-
-func TestAssigneeMentionUsesVisibleAgentName(t *testing.T) {
-	dispatcher := &Dispatcher{}
-	mention, err := dispatcher.assigneeMention(context.Background(), multica.Issue{
-		AssigneeType: "agent",
-		AssigneeID:   "agent-id",
-	}, map[string]multica.Agent{"agent-id": {ID: "agent-id", Name: "Worker"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if mention != "[@Worker](mention://agent/agent-id)" {
-		t.Fatalf("unexpected visible-agent mention %q", mention)
 	}
 }
 
@@ -397,9 +397,12 @@ func TestDisabledReviewDispatchStillNotifiesIssueForUnmarkedComment(t *testing.T
 	if len(multicaClient.addedComments) != 1 {
 		t.Fatalf("notifications=%d, want 1", len(multicaClient.addedComments))
 	}
+	if multicaClient.rerunCalls != 1 {
+		t.Fatalf("issue reruns=%d, want 1", multicaClient.rerunCalls)
+	}
 	notification := multicaClient.addedComments[0]
 	if !strings.Contains(notification, "https://github.com/owner/repo/pull/9#discussion_r901") ||
-		strings.Contains(notification, "Codex Connector found a race") {
+		strings.Contains(notification, "Codex Connector found a race") || strings.Contains(notification, "mention://") {
 		t.Fatalf("unexpected notification %q", notification)
 	}
 	dashboard, err := store.Dashboard(context.Background(), 10)
@@ -480,14 +483,97 @@ func TestCIFailureNotifiesIssueOncePerHead(t *testing.T) {
 	if len(multicaClient.addedComments) != 1 {
 		t.Fatalf("notifications=%d, want 1", len(multicaClient.addedComments))
 	}
+	if multicaClient.rerunCalls != 1 {
+		t.Fatalf("issue reruns=%d, want 1", multicaClient.rerunCalls)
+	}
 	notification := multicaClient.addedComments[0]
 	if !strings.Contains(notification, "CI 失败") ||
 		!strings.Contains(notification, "https://github.com/owner/repo/actions/runs/77") ||
-		strings.Contains(notification, "build: failure") {
+		strings.Contains(notification, "build: failure") || strings.Contains(notification, "mention://") {
 		t.Fatalf("unexpected notification %q", notification)
 	}
 	status, err := store.Status(context.Background())
 	if err != nil || status.CIFailures["queued"] != 1 || status.Outbox["delivered"] != 1 {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+}
+
+func TestFeedbackWakeupPermissionFailureRemainsRetryable(t *testing.T) {
+	store, err := state.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	input := state.FeedbackInput{
+		Repo: "owner/repo", EventID: 77, PullNumber: 9, IssueKey: "SEEK-9",
+		Body: "finding", Metadata: map[string]any{}, OccurredAt: now,
+	}
+	if _, err := store.IngestReviews(ctx, []state.FeedbackInput{input}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.PendingFeedback(ctx, 10)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending=%+v err=%v", pending, err)
+	}
+	marker := "<!-- wake-marker -->"
+	if err := store.QueueFeedback(ctx, pending[0], state.OutboxInput{
+		EventKey: "review:owner/repo:77", Kind: "review", IssueKey: "SEEK-9",
+		Body: "review feedback\n" + marker, Marker: marker,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeMulticaClient{now: now, rerunErr: errors.New("no permission to invoke assignee")}
+	worker := New(&config.Config{}, nil, client, nil, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := worker.deliverOutbox(ctx); err == nil || !strings.Contains(err.Error(), "no permission") {
+		t.Fatalf("unexpected delivery error %v", err)
+	}
+	if len(client.addedComments) != 1 || client.rerunCalls != 1 {
+		t.Fatalf("comments=%d reruns=%d", len(client.addedComments), client.rerunCalls)
+	}
+	status, err := store.Status(ctx)
+	if err != nil || status.Outbox["pending"] != 1 {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+}
+
+func TestFeedbackDeliveryRecoversFromExistingRunAfterComment(t *testing.T) {
+	store, err := state.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	input := state.FeedbackInput{
+		Repo: "owner/repo", EventID: 78, PullNumber: 10, IssueKey: "SEEK-10",
+		Body: "finding", Metadata: map[string]any{}, OccurredAt: now,
+	}
+	if _, err := store.IngestReviews(ctx, []state.FeedbackInput{input}); err != nil {
+		t.Fatal(err)
+	}
+	pending, _ := store.PendingFeedback(ctx, 10)
+	marker := "<!-- existing-wake-marker -->"
+	if err := store.QueueFeedback(ctx, pending[0], state.OutboxInput{
+		EventKey: "review:owner/repo:78", Kind: "review", IssueKey: "SEEK-10",
+		Body: "review feedback\n" + marker, Marker: marker,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeMulticaClient{
+		comments: []multica.Comment{{ID: "comment", Content: marker, CreatedAt: now}},
+		runs:     []multica.IssueRun{{ID: "run", CreatedAt: now.Add(time.Second)}},
+	}
+	worker := New(&config.Config{}, nil, client, nil, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := worker.deliverOutbox(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if client.rerunCalls != 0 || len(client.addedComments) != 0 {
+		t.Fatalf("unexpected comment or rerun: comments=%d reruns=%d", len(client.addedComments), client.rerunCalls)
+	}
+	status, err := store.Status(ctx)
+	if err != nil || status.Outbox["delivered"] != 1 {
 		t.Fatalf("status=%+v err=%v", status, err)
 	}
 }
