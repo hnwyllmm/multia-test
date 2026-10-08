@@ -30,6 +30,7 @@ type Payload struct {
 	WorkspaceID            string              `json:"workspace_id"`
 	WorkspaceURL           string              `json:"workspace_url,omitempty"`
 	WorkspacePrefix        string              `json:"workspace_prefix"`
+	AutoReviewEnabled      bool                `json:"auto_review_enabled"`
 	RefreshIntervalSeconds int                 `json:"refresh_interval_seconds"`
 	PollIntervalSeconds    int                 `json:"poll_interval_seconds"`
 	Data                   state.DashboardData `json:"data"`
@@ -93,6 +94,7 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 		Version: s.version, WorkspaceID: s.cfg.Multica.WorkspaceID,
 		WorkspaceURL:           s.cfg.Multica.WorkspaceURL,
 		WorkspacePrefix:        s.cfg.Multica.Prefix,
+		AutoReviewEnabled:      s.cfg.ReviewDispatch.IsEnabled(),
 		RefreshIntervalSeconds: int(s.cfg.Dashboard.RefreshInterval.Duration.Seconds()),
 		PollIntervalSeconds:    int(s.cfg.PollInterval.Duration.Seconds()),
 		Data:                   data,

@@ -94,9 +94,14 @@ multica:
   workspace_id: workspace
   workspace_prefix: WANG
   auth: {type: env, name: MULTICA_TOKEN}
+review_dispatch:
+  agents:
+    - id: reviewer
+      name: Reviewer
+      webhook: {type: env, name: REVIEWER_WEBHOOK_URL}
 repositories:
   - github: owner/repo
-    reviewer_squad_id: squad
+    reviewer_ids: [reviewer]
     reviewer_count: 1
     ocr_version: 1.12.8
 state_db: /tmp/state.db
@@ -134,6 +139,68 @@ func TestDashboardAcceptsWildcardListener(t *testing.T) {
 	}
 }
 
+func TestReviewDispatchCanBeDisabledWithoutReviewers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := `poll_interval: 1m
+bootstrap_lookback: 24h
+github:
+  auth: {type: env, name: GITHUB_TOKEN}
+  proxy: {type: none}
+multica:
+  server_url_env: MULTICA_SERVER_URL
+  workspace_id: workspace
+  workspace_prefix: SEEK
+  auth: {type: env, name: MULTICA_TOKEN}
+review_dispatch:
+  enabled: false
+repositories:
+  - github: owner/repo
+    review_comment_mode: all
+    process_changes_requested: true
+state_db: /tmp/state.db
+`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ReviewDispatch.IsEnabled() {
+		t.Fatal("automatic review dispatch should be disabled")
+	}
+	if cfg.Repositories[0].ReviewCommentMode != "all" {
+		t.Fatalf("unexpected review comment mode %q", cfg.Repositories[0].ReviewCommentMode)
+	}
+}
+
+func TestReviewCommentModeDefaultsToMarked(t *testing.T) {
+	cfg := validTestConfig(t, "")
+	if cfg.Repositories[0].ReviewCommentMode != "marked" {
+		t.Fatalf("unexpected review comment mode %q", cfg.Repositories[0].ReviewCommentMode)
+	}
+	if !cfg.ReviewDispatch.IsEnabled() {
+		t.Fatal("review dispatch must remain enabled when enabled is omitted")
+	}
+}
+
+func TestRepositoryAllowsConfiguredTargetBranches(t *testing.T) {
+	repository := Repository{TargetBranches: []string{"master", "release/**"}}
+	for _, branch := range []string{"master", "release/1.5.0", "release/1.5/hotfix"} {
+		if !repository.AllowsTargetBranch(branch) {
+			t.Errorf("expected target branch %q to be allowed", branch)
+		}
+	}
+	for _, branch := range []string{"main", "release", "feature/release/1.5"} {
+		if repository.AllowsTargetBranch(branch) {
+			t.Errorf("expected target branch %q to be rejected", branch)
+		}
+	}
+	if !(Repository{}).AllowsTargetBranch("any-branch") {
+		t.Fatal("an omitted target branch policy must remain backward compatible")
+	}
+}
+
 func validTestConfig(t *testing.T, dashboard string) *Config {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -158,9 +225,15 @@ multica:
   workspace_id: workspace
   workspace_prefix: WANG
   auth: {type: env, name: MULTICA_TOKEN}
+review_dispatch:
+  request_timeout: 30s
+  agents:
+    - id: reviewer
+      name: Reviewer
+      webhook: {type: env, name: REVIEWER_WEBHOOK_URL}
 ` + dashboard + `repositories:
   - github: owner/repo
-    reviewer_squad_id: squad
+    reviewer_ids: [reviewer]
     reviewer_count: 1
     ocr_version: 1.12.8
 state_db: /tmp/state.db

@@ -19,6 +19,7 @@ import (
 	gh "github.com/hnwyllmm/multia-test/internal/github"
 	"github.com/hnwyllmm/multia-test/internal/lock"
 	"github.com/hnwyllmm/multia-test/internal/multica"
+	"github.com/hnwyllmm/multia-test/internal/reviewer"
 	"github.com/hnwyllmm/multia-test/internal/state"
 )
 
@@ -77,19 +78,35 @@ func execute(command string, dryRun bool, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	multicaClient, err := multica.New(cfg.Multica)
-	if err != nil {
-		return err
+	var reviewerClient *reviewer.Client
+	if cfg.ReviewDispatch.IsEnabled() {
+		reviewerClient, err = reviewer.New(cfg.ReviewDispatch)
+		if err != nil {
+			return err
+		}
 	}
-	// Validate both credentials and both network paths before touching the state
-	// database. In particular, a bad GitHub proxy must never advance a cursor.
+	// GitHub is always required. Reviewer webhooks are required only while the
+	// independent automatic-review lane is enabled. Multica remains optional
+	// context and feedback routing so a temporary outage does not halt polling.
 	if err := githubClient.Check(ctx); err != nil {
 		return err
 	}
-	if err := multicaClient.Check(ctx); err != nil {
-		return err
+	if reviewerClient != nil {
+		if err := reviewerClient.Check(); err != nil {
+			return err
+		}
 	}
-	logger.Info("dependencies ready", "github_proxy", githubClient.ProxyLabel(), "workspace_id", cfg.Multica.WorkspaceID)
+	var multicaClient *multica.Client
+	if candidate, createErr := multica.New(cfg.Multica); createErr != nil {
+		logger.Warn("optional Multica client unavailable", "error", createErr)
+	} else if checkErr := candidate.Check(ctx); checkErr != nil {
+		logger.Warn("optional Multica workspace unavailable", "error", checkErr)
+	} else {
+		multicaClient = candidate
+	}
+	logger.Info("dependencies ready", "github_proxy", githubClient.ProxyLabel(),
+		"auto_review_enabled", cfg.ReviewDispatch.IsEnabled(),
+		"reviewers", len(cfg.ReviewDispatch.Agents), "multica_available", multicaClient != nil)
 
 	if !dryRun {
 		if err := os.MkdirAll(filepath.Dir(cfg.StateDB), 0o700); err != nil {
@@ -113,7 +130,7 @@ func execute(command string, dryRun bool, cfg *config.Config) error {
 	}
 	defer store.Close()
 
-	worker := dispatcher.New(cfg, githubClient, multicaClient, store, logger)
+	worker := dispatcher.New(cfg, githubClient, multicaClient, reviewerClient, store, logger)
 
 	if command == "once" {
 		return pollOnce(ctx, store, worker, dryRun)
@@ -174,11 +191,12 @@ func printStatus(cfg *config.Config) error {
 		return err
 	}
 	output := struct {
-		Version     string       `json:"version"`
-		WorkspaceID string       `json:"workspace_id"`
-		StateDB     string       `json:"state_db"`
-		Status      state.Status `json:"status"`
-	}{version, cfg.Multica.WorkspaceID, cfg.StateDB, status}
+		Version           string       `json:"version"`
+		WorkspaceID       string       `json:"workspace_id"`
+		StateDB           string       `json:"state_db"`
+		AutoReviewEnabled bool         `json:"auto_review_enabled"`
+		Status            state.Status `json:"status"`
+	}{version, cfg.Multica.WorkspaceID, cfg.StateDB, cfg.ReviewDispatch.IsEnabled(), status}
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(output)

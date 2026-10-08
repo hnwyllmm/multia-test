@@ -36,8 +36,8 @@ function relativeTime(value) {
 
 function statusClass(status) {
   const value = (status || "").toLowerCase();
-  if (["success", "delivered", "dispatched"].includes(value)) return "good";
-  if (["error", "permanent_error", "failed"].includes(value)) return "bad";
+  if (["success", "delivered", "dispatched", "ready", "online"].includes(value)) return "good";
+  if (["error", "permanent_error", "failed"].includes(value) || value.includes("offline")) return "bad";
   return "warn";
 }
 
@@ -56,7 +56,7 @@ function githubURL(repo, pull) {
 }
 
 function multicaIssueURL(workspaceURL, issueKey) {
-  if (!workspaceURL) return "";
+  if (!workspaceURL || !issueKey) return "";
   return `${workspaceURL.replace(/\/+$/, "")}/issues/${encodeURIComponent(issueKey)}`;
 }
 
@@ -128,7 +128,9 @@ function renderRounds(rounds, workspaceURL) {
     prCell.append(link, node("span", "secondary", `head ${shortSHA(item.head_sha)}`));
     const issue = node("td");
     const issueURL = multicaIssueURL(workspaceURL, item.issue_key);
-    if (issueURL) {
+    if (!item.issue_key) {
+      issue.append(node("span", "muted", "未关联"));
+    } else if (issueURL) {
       const issueLink = node("a", "primary external", item.issue_key);
       issueLink.href = issueURL;
       issueLink.target = "_blank";
@@ -223,6 +225,39 @@ function renderCursors(items) {
   }
 }
 
+function renderReviewerReadiness(items, autoReviewEnabled) {
+  const target = byId("reviewer-readiness");
+  target.replaceChildren();
+  if (!autoReviewEnabled) {
+    target.append(node("div", "empty", "自动 PR review 已关闭；仅保留 review 意见回流。"));
+    return;
+  }
+  const filtered = items.filter((item) => matches(
+    item.agent_name,
+    item.agent_status,
+    item.runtime_name,
+    item.runtime_status,
+    item.reason,
+  ));
+  for (const item of filtered) {
+    const wrapper = node("div", "readiness");
+    const identity = node("div", "readiness-main");
+    identity.append(
+      node("span", "primary", item.agent_name || "未知 Reviewer"),
+      node("span", "secondary", item.reason === "webhook_configured" ? "Autopilot webhook" : (item.runtime_name || "未绑定 runtime")),
+    );
+    identity.title = `agent ${item.agent_id}${item.runtime_id ? ` · runtime ${item.runtime_id}` : ""}`;
+    const status = badge(item.ready ? "ready" : (item.reason || "not_ready"));
+    status.title = `agent=${item.agent_status || "unknown"} · runtime=${item.runtime_status || "unknown"} · checked=${formatTime(item.checked_at)}`;
+    wrapper.append(identity, status);
+    target.append(wrapper);
+  }
+  if (!target.children.length) {
+    const message = state.filter && items.length > 0 ? "没有匹配的 reviewer" : "尚未检查 reviewer runtime";
+    target.append(node("div", "empty", message));
+  }
+}
+
 function renderOutbox(items) {
   const target = byId("outbox");
   target.replaceChildren();
@@ -239,7 +274,7 @@ function renderOutbox(items) {
     lastError.title = item.last_error || "";
     const updated = node("td", "event-time", relativeTime(item.updated_at));
     updated.title = formatTime(item.updated_at);
-    row.append(event, node("td", "primary", item.issue_key), status, node("td", "mono", item.attempts), lastError, updated);
+    row.append(event, node("td", "primary", item.issue_key || "—"), status, node("td", "mono", item.attempts), lastError, updated);
     target.append(row);
   }
 }
@@ -253,8 +288,10 @@ function render() {
   renderFeedback(payload.data.feedback);
   renderPolls(payload.data.poll_runs);
   renderCursors(payload.data.cursors);
+  renderReviewerReadiness(payload.data.reviewer_readiness || [], payload.auto_review_enabled);
   renderOutbox(payload.data.outbox);
-  setText("subtitle", `${payload.workspace_prefix} workspace · ${payload.workspace_id} · 每 ${payload.poll_interval_seconds}s 轮询`);
+  const mode = payload.auto_review_enabled ? "自动 PR review 已开启" : "自动 PR review 已关闭，仅通知 review 意见";
+  setText("subtitle", `${mode} · ${payload.workspace_prefix} 工单关联 · 每 ${payload.poll_interval_seconds}s 轮询`);
   setText("updated", `数据生成于 ${formatTime(payload.data.generated_at)} · 自动刷新 ${payload.refresh_interval_seconds}s`);
   setText("version", `multica-github-dispatcher ${payload.version}`);
 }
