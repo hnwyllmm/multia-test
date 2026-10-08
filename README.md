@@ -14,9 +14,12 @@ to stop the first lane without stopping GitHub feedback delivery:
    and adds its context to the review payload. A clean review creates no GitHub
    or Multica comment.
 2. If the PR has an associated active Multica issue, qualifying inline review
-   comments and `CHANGES_REQUESTED` reviews add a link-only comment, then invoke
-   the current assignment with Multica's native `issue rerun`; the GitHub
-   review body is not copied into the issue. `review_comment_mode: marked`
+   comments and `CHANGES_REQUESTED` reviews add a link-only comment; the GitHub
+   review body is not copied into the issue. If the current assignee is visible
+   to the dispatcher, the comment includes its real Multica mention. A private
+   or otherwise invisible assignee receives a plain comment, never a synthetic
+   mention. The dispatcher does not call `issue rerun`, so comment-only delivery
+   does not guarantee that a private Agent starts a new run. `review_comment_mode: marked`
    accepts only findings carrying the hidden `automated-review-finding:v1`
    marker. `review_comment_mode: all` accepts unmarked root inline comments
    too, including comments produced by Codex Connector. Thread replies are
@@ -91,18 +94,10 @@ their own existing `gh` authentication to publish reviews.
 
 Multica supports either an environment variable or a token file. A token file
 must be a regular file with mode `0600` or stricter and is read before every CLI
-call, so an atomic replacement rotates it without restarting the service. The
-token's member must be allowed to invoke every possible issue assignee. For a
-private work Agent, its owner can grant only the dispatcher member access:
-
-```bash
-multica agent update <agent-id> \
-  --permission-mode public_to \
-  --public-to-member <dispatcher-member-user-id>
-```
-
-Without this permission, the link comment remains visible and the outbox keeps
-the native wake-up retryable, but Multica will not start an Agent run.
+call, so an atomic replacement rotates it without restarting the service. When
+the token can resolve the current assignee through Multica, the notification
+uses that assignee's exact mention URI. Otherwise the same link-only comment is
+delivered without an `@` mention. Comment-only mode never calls `issue rerun`.
 
 Each `run_only` Autopilot webhook URL is an opaque credential. Store it through
 an environment or mode-`0600` file reference. The URL is resolved on every
@@ -137,8 +132,6 @@ the per-repository review-comment cursor avoids boundary loss. Review webhook
 requests carry the round event key in both JSON and the `Idempotency-Key`
 header. Multica feedback comments carry HTML markers; the outbox checks those
 markers before retries to prevent duplicate comments after an ambiguous write.
-Before calling `issue rerun`, it also checks for an issue run created after the
-notification comment, preventing a duplicate wake-up after an ambiguous retry.
 
 ## Read-only dashboard
 

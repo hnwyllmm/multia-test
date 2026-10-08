@@ -42,9 +42,7 @@ type multicaClient interface {
 	ListRuntimes(context.Context) ([]multica.Runtime, error)
 	GetSquad(context.Context, string) (multica.Squad, error)
 	ListComments(context.Context, string) ([]multica.Comment, error)
-	AddComment(context.Context, string, string) (multica.Comment, error)
-	ListIssueRuns(context.Context, string) ([]multica.IssueRun, error)
-	RerunIssue(context.Context, string) error
+	AddComment(context.Context, string, string) error
 }
 
 func New(cfg *config.Config, github *gh.Client, multicaClient multicaClient, reviewerClient *reviewer.Client, store *state.Store, logger *slog.Logger) *Dispatcher {
@@ -456,6 +454,15 @@ func (d *Dispatcher) queueFeedback(ctx context.Context) error {
 	if d.multica == nil {
 		return errors.New("Multica is unavailable for feedback routing")
 	}
+	agentsByID := map[string]multica.Agent{}
+	agents, err := d.multica.ListAgents(ctx)
+	if err != nil {
+		d.logger.Warn("assignee agent names unavailable; feedback will use plain comments", "error", err)
+	} else {
+		for _, agent := range agents {
+			agentsByID[agent.ID] = agent
+		}
+	}
 	for _, item := range items {
 		issue, err := d.multica.GetIssue(ctx, item.IssueKey)
 		if err != nil {
@@ -474,7 +481,8 @@ func (d *Dispatcher) queueFeedback(ctx context.Context) error {
 			_ = d.store.PermanentFeedback(ctx, item, "unsupported issue assignee type: "+issue.AssigneeType)
 			continue
 		}
-		marker, body := feedbackMessage(item)
+		mention := d.assigneeMention(ctx, issue, agentsByID)
+		marker, body := feedbackMessage(item, mention)
 		outbox := state.OutboxInput{
 			EventKey: fmt.Sprintf("%s:%s:%s", item.Kind, item.Repo, item.EventID),
 			Kind:     item.Kind, IssueKey: item.IssueKey, Body: body, Marker: marker,
@@ -531,38 +539,16 @@ func (d *Dispatcher) deliverOutbox(ctx context.Context) error {
 			continue
 		}
 		alreadyCommented := false
-		var notification multica.Comment
 		for _, comment := range comments {
 			if strings.Contains(comment.Content, item.Marker) {
 				alreadyCommented = true
-				notification = comment
 				break
 			}
 		}
 		if !alreadyCommented {
-			notification, err = d.multica.AddComment(ctx, item.IssueKey, item.Body)
-			if err != nil {
+			if err := d.multica.AddComment(ctx, item.IssueKey, item.Body); err != nil {
 				_ = d.store.RetryOutbox(ctx, item.ID, err.Error(), multica.RetryDelay(item.Attempts))
 				deliveryErrors = append(deliveryErrors, fmt.Errorf("%s delivery: %w", item.EventKey, err))
-				continue
-			}
-		}
-		if notification.CreatedAt.IsZero() {
-			err := errors.New("Multica feedback comment has no valid created_at timestamp")
-			_ = d.store.RetryOutbox(ctx, item.ID, err.Error(), multica.RetryDelay(item.Attempts))
-			deliveryErrors = append(deliveryErrors, fmt.Errorf("%s wake-up: %w", item.EventKey, err))
-			continue
-		}
-		alreadyWoken, err := d.issueRunAfter(ctx, item.IssueKey, notification.CreatedAt)
-		if err != nil {
-			_ = d.store.RetryOutbox(ctx, item.ID, err.Error(), multica.RetryDelay(item.Attempts))
-			deliveryErrors = append(deliveryErrors, fmt.Errorf("%s run lookup: %w", item.EventKey, err))
-			continue
-		}
-		if !alreadyWoken {
-			if err := d.multica.RerunIssue(ctx, item.IssueKey); err != nil {
-				_ = d.store.RetryOutbox(ctx, item.ID, err.Error(), multica.RetryDelay(item.Attempts))
-				deliveryErrors = append(deliveryErrors, fmt.Errorf("%s wake-up: %w", item.EventKey, err))
 				continue
 			}
 		}
@@ -571,23 +557,9 @@ func (d *Dispatcher) deliverOutbox(ctx context.Context) error {
 			continue
 		}
 		d.logger.Info("outbox delivered", "event_key", item.EventKey, "kind", item.Kind,
-			"issue", item.IssueKey, "recovered_by_marker", alreadyCommented,
-			"recovered_by_existing_run", alreadyWoken)
+			"issue", item.IssueKey, "recovered_by_marker", alreadyCommented)
 	}
 	return errors.Join(deliveryErrors...)
-}
-
-func (d *Dispatcher) issueRunAfter(ctx context.Context, issueKey string, commentTime time.Time) (bool, error) {
-	runs, err := d.multica.ListIssueRuns(ctx, issueKey)
-	if err != nil {
-		return false, err
-	}
-	for _, run := range runs {
-		if !run.CreatedAt.IsZero() && !run.CreatedAt.Before(commentTime) {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 func (d *Dispatcher) selectReviewers(ctx context.Context, repository config.Repository, issue *multica.Issue, pull gh.PullRequest) ([]config.ReviewAgent, error) {
@@ -735,6 +707,29 @@ func reviewerReadinessSummary(items []state.ReviewerReadiness) string {
 	return strings.Join(parts, ", ")
 }
 
+func (d *Dispatcher) assigneeMention(ctx context.Context, issue multica.Issue, agents map[string]multica.Agent) string {
+	switch issue.AssigneeType {
+	case "agent":
+		agent, ok := agents[issue.AssigneeID]
+		if !ok || strings.TrimSpace(agent.Name) == "" {
+			d.logger.Warn("assignee agent is not visible; using plain feedback comment",
+				"issue", issue.Identifier, "agent_id", issue.AssigneeID)
+			return ""
+		}
+		return fmt.Sprintf("[@%s](mention://agent/%s)", agent.Name, issue.AssigneeID)
+	case "squad":
+		squad, err := d.multica.GetSquad(ctx, issue.AssigneeID)
+		if err != nil || strings.TrimSpace(squad.Name) == "" {
+			d.logger.Warn("assignee squad is not visible; using plain feedback comment",
+				"issue", issue.Identifier, "squad_id", issue.AssigneeID, "error", err)
+			return ""
+		}
+		return fmt.Sprintf("[@%s](mention://squad/%s)", squad.Name, issue.AssigneeID)
+	default:
+		return ""
+	}
+}
+
 func issueKeyFromPull(prefix, title, body string) (string, bool) {
 	pattern := regexp.MustCompile(`(?i)(?:^|[^A-Z0-9])(` + regexp.QuoteMeta(prefix) + `-([1-9][0-9]*))(?:[^A-Z0-9]|$)`)
 	for _, value := range []string{title, body} {
@@ -865,7 +860,7 @@ func truncateRunes(value string, limit int) string {
 	return string(runes[:limit]) + "…"
 }
 
-func feedbackMessage(item state.PendingFeedback) (string, string) {
+func feedbackMessage(item state.PendingFeedback, mention string) (string, string) {
 	markerKind := "github-review-comment-dispatch"
 	idName := "comment"
 	prompt := "有新的 Review 意见"
@@ -882,11 +877,15 @@ func feedbackMessage(item state.PendingFeedback) (string, string) {
 	if url == "" {
 		url = fmt.Sprintf("https://github.com/%s/pull/%d", item.Repo, item.PullNumber)
 	}
-	body := fmt.Sprintf(`PR %s#%d %s，请打开 GitHub 链接查看并处理：
+	prefix := ""
+	if strings.TrimSpace(mention) != "" {
+		prefix = mention + "\n\n"
+	}
+	body := fmt.Sprintf(`%sPR %s#%d %s，请打开 GitHub 链接查看并处理：
 
 %s
 
-%s`, item.Repo, item.PullNumber, prompt, url, marker)
+%s`, prefix, item.Repo, item.PullNumber, prompt, url, marker)
 	return marker, body
 }
 
