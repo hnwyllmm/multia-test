@@ -8,7 +8,8 @@ It runs two independent polling lanes:
 1. A new open PR, or a new head SHA on an existing PR, creates one review
    round. The PR title must start with `[WANG-N]`. Reviewers are selected
    deterministically from the configured Multica squad and mentioned on the
-   existing Multica issue.
+   existing Multica issue. A clean review is recorded only on the Multica
+   issue; it does not create a GitHub review or comment.
 2. A GitHub inline review comment whose first non-empty line starts with
    `multica:fix`, or a `CHANGES_REQUESTED` review, mentions the issue's current
    assignee. This lane does not depend on the PR having been dispatched for

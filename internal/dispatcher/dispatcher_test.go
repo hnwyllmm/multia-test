@@ -91,10 +91,19 @@ func TestReviewInvitationDoesNotRequireMulticaToken(t *testing.T) {
 	message := reviewInvitation(multica.Agent{ID: "reviewer", Name: "Reviewer"}, "WANG-2", gh.PullRequest{
 		HTMLURL: "https://github.com/owner/repo/pull/3", BaseSHA: "base", HeadSHA: "head",
 	}, "1.12.8", "marker")
-	for _, expected := range []string{"不要调用 Multica CLI", "不要读取或索取 MULTICA_TOKEN", "Multica runtime 自动写回当前工单"} {
+	for _, expected := range []string{
+		"不要调用 Multica CLI",
+		"不要读取或索取 MULTICA_TOKEN",
+		"Multica runtime 自动写回当前工单",
+		"如果没有 actionable finding",
+		"不要在 GitHub 创建 review、inline comment 或 PR conversation comment",
+	} {
 		if !strings.Contains(message, expected) {
 			t.Fatalf("review invitation missing %q: %s", expected, message)
 		}
+	}
+	if strings.Contains(message, "没有问题时提交无问题结论") {
+		t.Fatalf("review invitation still asks for a clean GitHub review: %s", message)
 	}
 }
 

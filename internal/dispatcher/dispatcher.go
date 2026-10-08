@@ -558,9 +558,10 @@ func reviewInvitation(reviewer multica.Agent, issueKey string, pull gh.PullReque
 2. 必须使用 open-code-review-delegate，覆盖 OCR 返回的全部 reviewable files。
 3. 不修改代码、不提交、不推送。
 4. 需要开发者处理的 GitHub inline comment，第一条非空行必须以 multica:fix 开头。
-5. 每个 finding 添加 multica-ocr-finding 幂等标记；没有问题时提交无问题结论。
-6. 不要调用 Multica CLI，也不要读取或索取 MULTICA_TOKEN；你的进度和最终响应会由 Multica runtime 自动写回当前工单。
-7. OCR 失败时在最终响应中报告错误，不要静默降级为普通自由审查。
+5. 每个 finding 添加 multica-ocr-finding 幂等标记。
+6. 如果没有 actionable finding，不要在 GitHub 创建 review、inline comment 或 PR conversation comment；只在最终响应中报告无问题结论，由 Multica runtime 自动写回当前工单。
+7. 不要调用 Multica CLI，也不要读取或索取 MULTICA_TOKEN；你的进度和最终响应会由 Multica runtime 自动写回当前工单。
+8. OCR 失败时在最终响应中报告错误，不要静默降级为普通自由审查。
 
 %s`, reviewer.Name, reviewer.ID, pull.HTMLURL, issueKey, pull.BaseSHA, pull.HeadSHA, ocrVersion, marker)
 }

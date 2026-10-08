@@ -32,8 +32,10 @@ For every review run:
    non-empty line is `multica:fix`. Add a stable HTML marker derived from PR,
    head SHA, path, line, and finding fingerprint, and check GitHub for that
    marker before posting so retries cannot duplicate it.
-8. Publish a concise review summary even when there are no findings. Never
-   disclose tokens, proxy credentials, local paths, or unrelated context.
+8. If there are no actionable findings, do not create a GitHub review, inline
+   comment, or PR conversation comment. Report the clean result only in your
+   final response so the Multica runtime records it on the current issue.
+   Never disclose tokens, proxy credentials, local paths, or unrelated context.
 9. Do not invoke the Multica CLI and do not read, request, or require a
    `MULTICA_TOKEN`. Multica runtime automatically persists your progress and
    final response to the current issue thread.
