@@ -139,6 +139,7 @@ func (c ReviewDispatchConfig) IsEnabled() bool {
 
 type Repository struct {
 	GitHub                  string   `yaml:"github"`
+	TargetBranches          []string `yaml:"target_branches,omitempty"`
 	ReviewerIDs             []string `yaml:"reviewer_ids"`
 	ReviewerCount           int      `yaml:"reviewer_count"`
 	ReviewEngine            string   `yaml:"review_engine"`
@@ -155,6 +156,25 @@ func (r Repository) OwnerRepo() (string, string, error) {
 		return "", "", fmt.Errorf("repository %q must be owner/name", r.GitHub)
 	}
 	return parts[0], parts[1], nil
+}
+
+func (r Repository) AllowsTargetBranch(branch string) bool {
+	if len(r.TargetBranches) == 0 {
+		return true
+	}
+	for _, pattern := range r.TargetBranches {
+		if strings.HasSuffix(pattern, "/**") {
+			prefix := strings.TrimSuffix(pattern, "**")
+			if strings.HasPrefix(branch, prefix) && len(branch) > len(prefix) {
+				return true
+			}
+			continue
+		}
+		if branch == pattern {
+			return true
+		}
+	}
+	return false
 }
 
 type Config struct {
@@ -278,6 +298,21 @@ func (c *Config) setDefaultsAndValidate() error {
 			return fmt.Errorf("duplicate repository %s", r.GitHub)
 		}
 		seen[key] = struct{}{}
+		branchPatterns := map[string]struct{}{}
+		for j, pattern := range r.TargetBranches {
+			pattern = strings.TrimSpace(pattern)
+			if pattern == "" {
+				return fmt.Errorf("repository %s target_branches[%d] is empty", r.GitHub, j)
+			}
+			if strings.Contains(pattern, "*") && (!strings.HasSuffix(pattern, "/**") || strings.Count(pattern, "*") != 2) {
+				return fmt.Errorf("repository %s target branch pattern %q must be exact or end in /**", r.GitHub, pattern)
+			}
+			if _, duplicate := branchPatterns[pattern]; duplicate {
+				return fmt.Errorf("repository %s has duplicate target branch pattern %q", r.GitHub, pattern)
+			}
+			branchPatterns[pattern] = struct{}{}
+			r.TargetBranches[j] = pattern
+		}
 		if reviewDispatchEnabled && len(r.ReviewerIDs) == 0 {
 			for _, agent := range c.ReviewDispatch.Agents {
 				r.ReviewerIDs = append(r.ReviewerIDs, agent.ID)

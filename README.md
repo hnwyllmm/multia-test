@@ -48,6 +48,13 @@ false, reviewer agents, webhook secrets, OCR settings, and review rounds are
 not required; feedback polling and Multica issue notifications remain active.
 Secrets are references, not literal YAML values.
 
+Use a repository's `target_branches` to limit both automatic review and
+feedback routing by the PR base branch. Entries are exact branch names or a
+prefix ending in `/**`; for example, `[master, "release/**"]` accepts `master`,
+`release/1.5.0`, and deeper release branches, but rejects `main` and feature
+branches. Omitting `target_branches` preserves the previous all-branches
+behavior.
+
 The GitHub proxy is entirely user supplied. The dispatcher does not create or
 modify a proxy:
 

@@ -42,6 +42,9 @@ dashboard:
 
 repositories:
   - github: hnwyllmm/multia-test
+    target_branches:
+      - master
+      - "release/**"
     reviewer_ids:
       - REPLACE_WITH_REVIEWER_A_AGENT_ID
       - REPLACE_WITH_REVIEWER_B_AGENT_ID

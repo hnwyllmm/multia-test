@@ -184,6 +184,23 @@ func TestReviewCommentModeDefaultsToMarked(t *testing.T) {
 	}
 }
 
+func TestRepositoryAllowsConfiguredTargetBranches(t *testing.T) {
+	repository := Repository{TargetBranches: []string{"master", "release/**"}}
+	for _, branch := range []string{"master", "release/1.5.0", "release/1.5/hotfix"} {
+		if !repository.AllowsTargetBranch(branch) {
+			t.Errorf("expected target branch %q to be allowed", branch)
+		}
+	}
+	for _, branch := range []string{"main", "release", "feature/release/1.5"} {
+		if repository.AllowsTargetBranch(branch) {
+			t.Errorf("expected target branch %q to be rejected", branch)
+		}
+	}
+	if !(Repository{}).AllowsTargetBranch("any-branch") {
+		t.Fatal("an omitted target branch policy must remain backward compatible")
+	}
+}
+
 func validTestConfig(t *testing.T, dashboard string) *Config {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")

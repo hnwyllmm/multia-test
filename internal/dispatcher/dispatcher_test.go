@@ -101,6 +101,21 @@ func TestReviewerScoreStable(t *testing.T) {
 	}
 }
 
+func TestEligiblePullsUseBaseBranchPolicy(t *testing.T) {
+	repository := config.Repository{TargetBranches: []string{"master", "release/**"}}
+	pulls := []gh.PullRequest{
+		{Number: 1, BaseRef: "master"},
+		{Number: 2, BaseRef: "release/1.5.0"},
+		{Number: 3, BaseRef: "release/1.5/hotfix"},
+		{Number: 4, BaseRef: "main"},
+		{Number: 5, BaseRef: "feature/test"},
+	}
+	eligible := eligiblePulls(repository, pulls)
+	if len(eligible) != 3 || eligible[0].Number != 1 || eligible[1].Number != 2 || eligible[2].Number != 3 {
+		t.Fatalf("unexpected eligible pulls %+v", eligible)
+	}
+}
+
 func TestReviewerRuntimeReadinessRequiresOnlineBoundRuntime(t *testing.T) {
 	configured := []config.ReviewAgent{
 		{ID: "online", Name: "Configured Online"},

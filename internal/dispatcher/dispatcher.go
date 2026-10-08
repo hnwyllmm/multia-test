@@ -89,10 +89,15 @@ func (d *Dispatcher) Once(ctx context.Context, dryRun bool) error {
 	}
 	for _, repository := range d.cfg.Repositories {
 		owner, repo, _ := repository.OwnerRepo()
-		pulls, err := d.github.ListOpenPulls(ctx, owner, repo)
+		allPulls, err := d.github.ListOpenPulls(ctx, owner, repo)
 		if err != nil {
 			laneErrors = append(laneErrors, fmt.Errorf("%s pull discovery: %w", repository.GitHub, err))
 			continue
+		}
+		pulls := eligiblePulls(repository, allPulls)
+		if len(pulls) != len(allPulls) {
+			d.logger.Info("pulls excluded by target branch policy", "repo", repository.GitHub,
+				"open", len(allPulls), "eligible", len(pulls), "target_branches", repository.TargetBranches)
 		}
 		pullMap := make(map[int]gh.PullRequest, len(pulls))
 		for _, pull := range pulls {
@@ -121,6 +126,16 @@ func (d *Dispatcher) Once(ctx context.Context, dryRun bool) error {
 		}
 	}
 	return errors.Join(laneErrors...)
+}
+
+func eligiblePulls(repository config.Repository, pulls []gh.PullRequest) []gh.PullRequest {
+	eligible := make([]gh.PullRequest, 0, len(pulls))
+	for _, pull := range pulls {
+		if repository.AllowsTargetBranch(pull.BaseRef) {
+			eligible = append(eligible, pull)
+		}
+	}
+	return eligible
 }
 
 func (d *Dispatcher) discoverReviewRounds(ctx context.Context, repository config.Repository, pulls []gh.PullRequest, dryRun bool) error {
