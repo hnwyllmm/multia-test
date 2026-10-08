@@ -94,15 +94,28 @@ func TestReviewRequestPayloadSupportsOptionalIssueContext(t *testing.T) {
 	}
 }
 
-func TestFeedbackMessagePreservesBodyAndMarker(t *testing.T) {
+func TestFeedbackMessageLinksWithoutCopyingBody(t *testing.T) {
 	rawBody := "[P1] keep $() and `ticks` verbatim\n\n<!-- automated-review-finding:v1 fingerprint=abc -->"
 	marker, body := feedbackMessage(state.PendingFeedback{
 		Kind: "review_comment", Repo: "owner/repo", EventID: 99,
 		PullNumber: 3, Body: rawBody,
 		Metadata: map[string]any{"author": "alice", "url": "https://example", "path": "a.go", "line": float64(8)},
 	}, "[@Worker](mention://agent/id)")
-	if !strings.Contains(body, rawBody) || !strings.Contains(body, marker) {
-		t.Fatal("feedback body or marker was not preserved")
+	if !strings.Contains(body, "https://example") || !strings.Contains(body, "owner/repo#3") ||
+		!strings.Contains(body, "[@Worker](mention://agent/id)") || !strings.Contains(body, marker) {
+		t.Fatalf("feedback notification is incomplete: %s", body)
+	}
+	if strings.Contains(body, rawBody) || strings.Contains(body, "GitHub review body") {
+		t.Fatalf("feedback copied the GitHub review body: %s", body)
+	}
+}
+
+func TestFeedbackMessageFallsBackToPullURL(t *testing.T) {
+	_, body := feedbackMessage(state.PendingFeedback{
+		Kind: "review", Repo: "owner/repo", EventID: 100, PullNumber: 4,
+	}, "[@Worker](mention://agent/id)")
+	if !strings.Contains(body, "https://github.com/owner/repo/pull/4") {
+		t.Fatalf("feedback has no usable fallback URL: %s", body)
 	}
 }
 

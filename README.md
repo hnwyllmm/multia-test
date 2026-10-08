@@ -15,7 +15,8 @@ It runs two independent polling lanes:
 2. An actionable inline finding carries a hidden
    `automated-review-finding:v1` HTML marker while keeping ordinary visible
    review text. If the PR has an associated active Multica issue, that finding
-   or a `CHANGES_REQUESTED` review mentions the issue's current assignee.
+   or a `CHANGES_REQUESTED` review mentions the issue's current assignee with a
+   link to GitHub; the GitHub review body is not copied into the issue.
 
 The dispatcher never exposes an inbound event port. GitHub is read through its
 REST API, reviewer webhooks are outbound HTTP(S) requests, and optional Multica
