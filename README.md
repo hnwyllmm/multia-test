@@ -95,6 +95,10 @@ markers before retries to prevent duplicate mentions after an ambiguous write.
 The dashboard shows repository and PR review rounds, linked Multica issues,
 GitHub feedback, delivery retries, cursors, and recent poll health. It reads
 SQLite directly and does not require GitHub or Multica credentials.
+Set `multica.workspace_url` to the public workspace URL so issue identifiers in
+the review-round table link to their Multica issue pages. Reviewer display names
+are recovered from the persisted dispatch mentions; UUIDs remain available only
+as hover text for diagnostics.
 
 The listener defaults to `127.0.0.1:8787`. Set it to `0.0.0.0:8787` to expose
 the dashboard on every dev-host IPv4 interface, then open

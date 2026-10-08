@@ -28,6 +28,7 @@ type Server struct {
 type Payload struct {
 	Version                string              `json:"version"`
 	WorkspaceID            string              `json:"workspace_id"`
+	WorkspaceURL           string              `json:"workspace_url,omitempty"`
 	WorkspacePrefix        string              `json:"workspace_prefix"`
 	RefreshIntervalSeconds int                 `json:"refresh_interval_seconds"`
 	PollIntervalSeconds    int                 `json:"poll_interval_seconds"`
@@ -90,6 +91,7 @@ func (s *Server) dashboard(writer http.ResponseWriter, request *http.Request) {
 	}
 	payload := Payload{
 		Version: s.version, WorkspaceID: s.cfg.Multica.WorkspaceID,
+		WorkspaceURL:           s.cfg.Multica.WorkspaceURL,
 		WorkspacePrefix:        s.cfg.Multica.Prefix,
 		RefreshIntervalSeconds: int(s.cfg.Dashboard.RefreshInterval.Duration.Seconds()),
 		PollIntervalSeconds:    int(s.cfg.PollInterval.Duration.Seconds()),

@@ -25,7 +25,7 @@ func TestDashboardAPIAndStaticPage(t *testing.T) {
 		Dashboard: config.DashboardConfig{
 			Listen: "127.0.0.1:8787", RefreshInterval: config.Duration{Duration: 10 * time.Second},
 		},
-		Multica: config.MulticaConfig{WorkspaceID: "workspace", Prefix: "WANG"},
+		Multica: config.MulticaConfig{WorkspaceID: "workspace", WorkspaceURL: "https://multica.example/team", Prefix: "WANG"},
 	}
 	server := New(store, cfg, "test-version", slog.New(slog.NewTextHandler(io.Discard, nil)))
 
@@ -51,6 +51,7 @@ func TestDashboardAPIAndStaticPage(t *testing.T) {
 		t.Fatal(err)
 	}
 	if payload.Version != "test-version" || payload.WorkspaceID != "workspace" ||
+		payload.WorkspaceURL != "https://multica.example/team" ||
 		payload.RefreshIntervalSeconds != 10 || payload.PollIntervalSeconds != 60 {
 		t.Fatalf("unexpected payload %+v", payload)
 	}

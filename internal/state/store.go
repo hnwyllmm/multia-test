@@ -86,19 +86,25 @@ type DashboardCursor struct {
 	LastSuccessAt string `json:"last_success_at"`
 }
 
+type DashboardReviewer struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+}
+
 type DashboardRound struct {
-	Repo          string   `json:"repo"`
-	PullNumber    int      `json:"pull_number"`
-	HeadSHA       string   `json:"head_sha"`
-	BaseSHA       string   `json:"base_sha"`
-	IssueKey      string   `json:"issue_key"`
-	ReviewerIDs   []string `json:"reviewer_ids"`
-	Status        string   `json:"status"`
-	LastError     string   `json:"last_error,omitempty"`
-	CreatedAt     string   `json:"created_at"`
-	UpdatedAt     string   `json:"updated_at"`
-	DeliveryTotal int      `json:"delivery_total"`
-	Delivered     int      `json:"delivered"`
+	Repo          string              `json:"repo"`
+	PullNumber    int                 `json:"pull_number"`
+	HeadSHA       string              `json:"head_sha"`
+	BaseSHA       string              `json:"base_sha"`
+	IssueKey      string              `json:"issue_key"`
+	ReviewerIDs   []string            `json:"reviewer_ids"`
+	Reviewers     []DashboardReviewer `json:"reviewers"`
+	Status        string              `json:"status"`
+	LastError     string              `json:"last_error,omitempty"`
+	CreatedAt     string              `json:"created_at"`
+	UpdatedAt     string              `json:"updated_at"`
+	DeliveryTotal int                 `json:"delivery_total"`
+	Delivered     int                 `json:"delivered"`
 }
 
 type DashboardFeedback struct {
@@ -638,7 +644,11 @@ func (s *Store) dashboardCursors(ctx context.Context) ([]DashboardCursor, error)
 func (s *Store) dashboardRounds(ctx context.Context, limit int) ([]DashboardRound, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT
 		r.repo, r.pr_number, r.head_sha, r.base_sha, r.issue_key,
-		r.reviewer_ids_json, r.status, r.last_error, r.created_at, r.updated_at,
+		r.reviewer_ids_json,
+		COALESCE((SELECT GROUP_CONCAT(o.body, char(10)) FROM outbox o WHERE o.kind='review_request' AND
+			substr(o.event_key, 1, length('review-request:' || r.repo || ':' || r.pr_number || ':' || r.head_sha || ':')) =
+			'review-request:' || r.repo || ':' || r.pr_number || ':' || r.head_sha || ':'), ''),
+		r.status, r.last_error, r.created_at, r.updated_at,
 		(SELECT COUNT(*) FROM outbox o WHERE o.kind='review_request' AND
 			substr(o.event_key, 1, length('review-request:' || r.repo || ':' || r.pr_number || ':' || r.head_sha || ':')) =
 			'review-request:' || r.repo || ':' || r.pr_number || ':' || r.head_sha || ':'),
@@ -653,14 +663,20 @@ func (s *Store) dashboardRounds(ctx context.Context, limit int) ([]DashboardRoun
 	result := []DashboardRound{}
 	for rows.Next() {
 		var item DashboardRound
-		var reviewers string
+		var reviewerIDs, reviewerBodies string
 		if err := rows.Scan(&item.Repo, &item.PullNumber, &item.HeadSHA, &item.BaseSHA,
-			&item.IssueKey, &reviewers, &item.Status, &item.LastError,
+			&item.IssueKey, &reviewerIDs, &reviewerBodies, &item.Status, &item.LastError,
 			&item.CreatedAt, &item.UpdatedAt, &item.DeliveryTotal, &item.Delivered); err != nil {
 			return nil, err
 		}
-		if err := json.Unmarshal([]byte(reviewers), &item.ReviewerIDs); err != nil {
+		if err := json.Unmarshal([]byte(reviewerIDs), &item.ReviewerIDs); err != nil {
 			return nil, err
+		}
+		item.Reviewers = make([]DashboardReviewer, 0, len(item.ReviewerIDs))
+		for _, reviewerID := range item.ReviewerIDs {
+			item.Reviewers = append(item.Reviewers, DashboardReviewer{
+				ID: reviewerID, Name: reviewerNameFromMentions(reviewerBodies, reviewerID),
+			})
 		}
 		if item.DeliveryTotal > 0 && item.DeliveryTotal == item.Delivered {
 			item.Status = "dispatched"
@@ -668,6 +684,19 @@ func (s *Store) dashboardRounds(ctx context.Context, limit int) ([]DashboardRoun
 		result = append(result, item)
 	}
 	return result, rows.Err()
+}
+
+func reviewerNameFromMentions(value, reviewerID string) string {
+	suffix := "](mention://agent/" + reviewerID + ")"
+	end := strings.Index(value, suffix)
+	if end < 0 {
+		return ""
+	}
+	start := strings.LastIndex(value[:end], "[@")
+	if start < 0 {
+		return ""
+	}
+	return strings.TrimSpace(value[start+2 : end])
 }
 
 func (s *Store) dashboardFeedback(ctx context.Context, limit int) ([]DashboardFeedback, error) {

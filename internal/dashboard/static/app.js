@@ -14,11 +14,6 @@ function shortSHA(value) {
   return value ? value.slice(0, 8) : "—";
 }
 
-function compactID(value) {
-  if (!value) return "—";
-  return value.length > 13 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;
-}
-
 function formatTime(value) {
   if (!value) return "—";
   const date = new Date(value);
@@ -58,6 +53,11 @@ function matches(...values) {
 
 function githubURL(repo, pull) {
   return `https://github.com/${repo}/pull/${pull}`;
+}
+
+function multicaIssueURL(workspaceURL, issueKey) {
+  if (!workspaceURL) return "";
+  return `${workspaceURL.replace(/\/+$/, "")}/issues/${encodeURIComponent(issueKey)}`;
 }
 
 function setText(id, value) {
@@ -105,10 +105,17 @@ function renderMetrics(summary) {
   setText("metric-failures", summary.failures);
 }
 
-function renderRounds(rounds) {
+function renderRounds(rounds, workspaceURL) {
   const target = byId("rounds");
   target.replaceChildren();
-  const filtered = rounds.filter((item) => matches(item.repo, item.pull_number, item.issue_key, item.head_sha, ...item.reviewer_ids));
+  const filtered = rounds.filter((item) => matches(
+    item.repo,
+    item.pull_number,
+    item.issue_key,
+    item.head_sha,
+    ...item.reviewer_ids,
+    ...(item.reviewers || []).flatMap((reviewer) => [reviewer.id, reviewer.name]),
+  ));
   setText("round-count", filtered.length);
   setEmptyState("rounds-empty", filtered.length, rounds.length, "还没有 review round。", "没有匹配的 review round。");
   for (const item of filtered) {
@@ -119,10 +126,23 @@ function renderRounds(rounds) {
     link.target = "_blank";
     link.rel = "noreferrer";
     prCell.append(link, node("span", "secondary", `head ${shortSHA(item.head_sha)}`));
-    const issue = node("td", "primary", item.issue_key);
+    const issue = node("td");
+    const issueURL = multicaIssueURL(workspaceURL, item.issue_key);
+    if (issueURL) {
+      const issueLink = node("a", "primary external", item.issue_key);
+      issueLink.href = issueURL;
+      issueLink.target = "_blank";
+      issueLink.rel = "noreferrer";
+      issue.append(issueLink);
+    } else {
+      issue.append(node("span", "primary", item.issue_key));
+    }
     const range = node("td", "mono", `${shortSHA(item.base_sha)} → ${shortSHA(item.head_sha)}`);
-    const reviewers = node("td", "mono", item.reviewer_ids.map(compactID).join(", ") || "—");
-    reviewers.title = item.reviewer_ids.join(", ");
+    const identities = item.reviewers?.length
+      ? item.reviewers
+      : (item.reviewer_ids || []).map((id) => ({ id, name: "" }));
+    const reviewers = node("td", "primary", identities.map((reviewer) => reviewer.name || "未知 Reviewer").join(", ") || "—");
+    reviewers.title = identities.map((reviewer) => reviewer.name ? `${reviewer.name} (${reviewer.id})` : reviewer.id).join(", ");
     const status = node("td");
     status.append(badge(item.status));
     const created = node("td", "event-time", relativeTime(item.created_at));
@@ -229,7 +249,7 @@ function render() {
   const payload = state.payload;
   renderHealth(payload);
   renderMetrics(payload.data.summary);
-  renderRounds(payload.data.rounds);
+  renderRounds(payload.data.rounds, payload.workspace_url);
   renderFeedback(payload.data.feedback);
   renderPolls(payload.data.poll_runs);
   renderCursors(payload.data.cursors);

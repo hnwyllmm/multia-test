@@ -87,7 +87,8 @@ func TestDashboardSummarizesDispatcherState(t *testing.T) {
 	}
 	created, err := store.CreateRound(ctx, round, []OutboxInput{{
 		EventKey: "review-request:owner/repo:4:head:reviewer-id",
-		Kind:     "review_request", IssueKey: "WANG-4", Body: "request", Marker: "round-marker",
+		Kind:     "review_request", IssueKey: "WANG-4",
+		Body: "[@Review General](mention://agent/reviewer-id)\n\nReview request", Marker: "round-marker",
 	}})
 	if err != nil || !created {
 		t.Fatalf("create round: created=%v err=%v", created, err)
@@ -143,7 +144,8 @@ func TestDashboardSummarizesDispatcherState(t *testing.T) {
 	if dashboard.Summary.Repositories != 1 || dashboard.Summary.Rounds != 1 || dashboard.Summary.Feedback != 1 {
 		t.Fatalf("unexpected summary %+v", dashboard.Summary)
 	}
-	if len(dashboard.Rounds) != 1 || dashboard.Rounds[0].Status != "dispatched" {
+	if len(dashboard.Rounds) != 1 || dashboard.Rounds[0].Status != "dispatched" ||
+		len(dashboard.Rounds[0].Reviewers) != 1 || dashboard.Rounds[0].Reviewers[0].Name != "Review General" {
 		t.Fatalf("unexpected rounds %+v", dashboard.Rounds)
 	}
 	if len(dashboard.Feedback) != 1 || dashboard.Feedback[0].DeliveryStatus != "delivered" ||

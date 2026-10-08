@@ -111,6 +111,7 @@ type MulticaConfig struct {
 	CLIPath      string    `yaml:"cli_path,omitempty"`
 	ServerURLEnv string    `yaml:"server_url_env"`
 	WorkspaceID  string    `yaml:"workspace_id"`
+	WorkspaceURL string    `yaml:"workspace_url,omitempty"`
 	Prefix       string    `yaml:"workspace_prefix"`
 	Auth         SecretRef `yaml:"auth"`
 }
@@ -195,6 +196,13 @@ func (c *Config) setDefaultsAndValidate() error {
 	}
 	if c.Multica.WorkspaceID == "" {
 		return errors.New("multica.workspace_id is required")
+	}
+	if c.Multica.WorkspaceURL != "" {
+		workspaceURL, err := url.Parse(c.Multica.WorkspaceURL)
+		if err != nil || workspaceURL.Host == "" || (workspaceURL.Scheme != "http" && workspaceURL.Scheme != "https") {
+			return errors.New("multica.workspace_url must be an absolute HTTP(S) URL")
+		}
+		c.Multica.WorkspaceURL = strings.TrimRight(c.Multica.WorkspaceURL, "/")
 	}
 	if !regexp.MustCompile(`^[A-Z][A-Z0-9]*$`).MatchString(c.Multica.Prefix) {
 		return errors.New("multica.workspace_prefix must contain uppercase letters and digits")
