@@ -128,8 +128,13 @@ type ReviewAgent struct {
 }
 
 type ReviewDispatchConfig struct {
+	Enabled        *bool         `yaml:"enabled,omitempty"`
 	RequestTimeout Duration      `yaml:"request_timeout"`
 	Agents         []ReviewAgent `yaml:"agents"`
+}
+
+func (c ReviewDispatchConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
 }
 
 type Repository struct {
@@ -139,6 +144,7 @@ type Repository struct {
 	ReviewEngine            string   `yaml:"review_engine"`
 	OCRVersion              string   `yaml:"ocr_version"`
 	FindingMarker           string   `yaml:"finding_marker"`
+	ReviewCommentMode       string   `yaml:"review_comment_mode"`
 	ProcessChangesRequested bool     `yaml:"process_changes_requested"`
 	TrustMode               string   `yaml:"trust_mode"`
 }
@@ -225,7 +231,8 @@ func (c *Config) setDefaultsAndValidate() error {
 	if c.ReviewDispatch.RequestTimeout.Duration == 0 {
 		c.ReviewDispatch.RequestTimeout.Duration = 30 * time.Second
 	}
-	if len(c.ReviewDispatch.Agents) == 0 {
+	reviewDispatchEnabled := c.ReviewDispatch.IsEnabled()
+	if reviewDispatchEnabled && len(c.ReviewDispatch.Agents) == 0 {
 		return errors.New("review_dispatch.agents must contain at least one reviewer")
 	}
 	reviewAgents := make(map[string]struct{}, len(c.ReviewDispatch.Agents))
@@ -271,7 +278,7 @@ func (c *Config) setDefaultsAndValidate() error {
 			return fmt.Errorf("duplicate repository %s", r.GitHub)
 		}
 		seen[key] = struct{}{}
-		if len(r.ReviewerIDs) == 0 {
+		if reviewDispatchEnabled && len(r.ReviewerIDs) == 0 {
 			for _, agent := range c.ReviewDispatch.Agents {
 				r.ReviewerIDs = append(r.ReviewerIDs, agent.ID)
 			}
@@ -286,23 +293,31 @@ func (c *Config) setDefaultsAndValidate() error {
 			}
 			repoReviewers[reviewerID] = struct{}{}
 		}
-		if r.ReviewerCount <= 0 {
-			r.ReviewerCount = 1
-		}
-		if r.ReviewEngine == "" {
-			r.ReviewEngine = "ocr_delegate"
-		}
-		if r.ReviewEngine != "ocr_delegate" {
-			return fmt.Errorf("repository %s unsupported review_engine %q", r.GitHub, r.ReviewEngine)
-		}
-		if r.OCRVersion == "" {
-			return fmt.Errorf("repository %s ocr_version is required", r.GitHub)
+		if reviewDispatchEnabled {
+			if r.ReviewerCount <= 0 {
+				r.ReviewerCount = 1
+			}
+			if r.ReviewEngine == "" {
+				r.ReviewEngine = "ocr_delegate"
+			}
+			if r.ReviewEngine != "ocr_delegate" {
+				return fmt.Errorf("repository %s unsupported review_engine %q", r.GitHub, r.ReviewEngine)
+			}
+			if r.OCRVersion == "" {
+				return fmt.Errorf("repository %s ocr_version is required", r.GitHub)
+			}
 		}
 		if r.FindingMarker == "" {
 			r.FindingMarker = "automated-review-finding:v1"
 		}
 		if !regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]*$`).MatchString(r.FindingMarker) {
 			return fmt.Errorf("repository %s finding_marker is invalid", r.GitHub)
+		}
+		if r.ReviewCommentMode == "" {
+			r.ReviewCommentMode = "marked"
+		}
+		if r.ReviewCommentMode != "marked" && r.ReviewCommentMode != "all" {
+			return fmt.Errorf("repository %s review_comment_mode must be marked or all", r.GitHub)
 		}
 		if r.TrustMode == "" {
 			r.TrustMode = "any"

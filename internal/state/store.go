@@ -527,6 +527,17 @@ func (s *Store) DueOutbox(ctx context.Context, limit int) ([]OutboxItem, error) 
 	return result, rows.Err()
 }
 
+func (s *Store) CancelPendingReviewRequests(ctx context.Context) (int64, error) {
+	now := timestamp(time.Now())
+	result, err := s.db.ExecContext(ctx, `UPDATE outbox
+		SET status='canceled', next_attempt_at=NULL, last_error='', updated_at=?
+		WHERE kind='review_request' AND status='pending'`, now)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 func (s *Store) DeliverOutbox(ctx context.Context, id int64) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE outbox SET status='delivered', last_error='', next_attempt_at=NULL, updated_at=? WHERE id=?`,
@@ -708,7 +719,7 @@ func (s *Store) dashboardSummary(ctx context.Context) (DashboardSummary, error) 
 		)),
 		(SELECT COUNT(*) FROM pr_rounds),
 		(SELECT COUNT(*) FROM review_comments) + (SELECT COUNT(*) FROM reviews),
-		(SELECT COUNT(*) FROM outbox WHERE status!='delivered'),
+		(SELECT COUNT(*) FROM outbox WHERE status='pending'),
 		(SELECT COUNT(*) FROM review_comments WHERE status='permanent_error') +
 		(SELECT COUNT(*) FROM reviews WHERE status='permanent_error') +
 		(SELECT COUNT(*) FROM outbox WHERE last_error!='')`).Scan(

@@ -78,17 +78,23 @@ func execute(command string, dryRun bool, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
-	reviewerClient, err := reviewer.New(cfg.ReviewDispatch)
-	if err != nil {
-		return err
+	var reviewerClient *reviewer.Client
+	if cfg.ReviewDispatch.IsEnabled() {
+		reviewerClient, err = reviewer.New(cfg.ReviewDispatch)
+		if err != nil {
+			return err
+		}
 	}
-	// GitHub and review-webhook configuration are required for the independent
-	// review lane. Multica is optional context and feedback routing.
+	// GitHub is always required. Reviewer webhooks are required only while the
+	// independent automatic-review lane is enabled. Multica remains optional
+	// context and feedback routing so a temporary outage does not halt polling.
 	if err := githubClient.Check(ctx); err != nil {
 		return err
 	}
-	if err := reviewerClient.Check(); err != nil {
-		return err
+	if reviewerClient != nil {
+		if err := reviewerClient.Check(); err != nil {
+			return err
+		}
 	}
 	var multicaClient *multica.Client
 	if candidate, createErr := multica.New(cfg.Multica); createErr != nil {
@@ -99,6 +105,7 @@ func execute(command string, dryRun bool, cfg *config.Config) error {
 		multicaClient = candidate
 	}
 	logger.Info("dependencies ready", "github_proxy", githubClient.ProxyLabel(),
+		"auto_review_enabled", cfg.ReviewDispatch.IsEnabled(),
 		"reviewers", len(cfg.ReviewDispatch.Agents), "multica_available", multicaClient != nil)
 
 	if !dryRun {
@@ -184,11 +191,12 @@ func printStatus(cfg *config.Config) error {
 		return err
 	}
 	output := struct {
-		Version     string       `json:"version"`
-		WorkspaceID string       `json:"workspace_id"`
-		StateDB     string       `json:"state_db"`
-		Status      state.Status `json:"status"`
-	}{version, cfg.Multica.WorkspaceID, cfg.StateDB, status}
+		Version           string       `json:"version"`
+		WorkspaceID       string       `json:"workspace_id"`
+		StateDB           string       `json:"state_db"`
+		AutoReviewEnabled bool         `json:"auto_review_enabled"`
+		Status            state.Status `json:"status"`
+	}{version, cfg.Multica.WorkspaceID, cfg.StateDB, cfg.ReviewDispatch.IsEnabled(), status}
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(output)

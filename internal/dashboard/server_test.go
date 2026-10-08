@@ -52,7 +52,7 @@ func TestDashboardAPIAndStaticPage(t *testing.T) {
 	}
 	if payload.Version != "test-version" || payload.WorkspaceID != "workspace" ||
 		payload.WorkspaceURL != "https://multica.example/team" ||
-		payload.RefreshIntervalSeconds != 10 || payload.PollIntervalSeconds != 60 {
+		!payload.AutoReviewEnabled || payload.RefreshIntervalSeconds != 10 || payload.PollIntervalSeconds != 60 {
 		t.Fatalf("unexpected payload %+v", payload)
 	}
 }

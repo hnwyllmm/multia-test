@@ -56,20 +56,36 @@ func (d *Dispatcher) Check(ctx context.Context) error {
 	if err := d.github.Check(ctx); err != nil {
 		return err
 	}
-	if d.reviewer == nil {
-		return errors.New("review webhook client is not configured")
+	if d.cfg.ReviewDispatch.IsEnabled() {
+		if d.reviewer == nil {
+			return errors.New("review webhook client is not configured")
+		}
+		if err := d.reviewer.Check(); err != nil {
+			return err
+		}
 	}
-	if err := d.reviewer.Check(); err != nil {
-		return err
-	}
-	d.logger.Info("review dependencies ready", "github_proxy", d.github.ProxyLabel(), "reviewers", len(d.cfg.ReviewDispatch.Agents))
+	d.logger.Info("review dependencies ready", "github_proxy", d.github.ProxyLabel(),
+		"auto_review_enabled", d.cfg.ReviewDispatch.IsEnabled(), "reviewers", len(d.cfg.ReviewDispatch.Agents))
 	return nil
 }
 
 func (d *Dispatcher) Once(ctx context.Context, dryRun bool) error {
 	var laneErrors []error
-	if err := d.recordConfiguredReviewers(ctx); err != nil {
-		laneErrors = append(laneErrors, fmt.Errorf("record reviewer configuration: %w", err))
+	if d.cfg.ReviewDispatch.IsEnabled() {
+		if err := d.recordConfiguredReviewers(ctx); err != nil {
+			laneErrors = append(laneErrors, fmt.Errorf("record reviewer configuration: %w", err))
+		}
+	} else if !dryRun {
+		canceled, err := d.store.CancelPendingReviewRequests(ctx)
+		if err != nil {
+			return fmt.Errorf("disable pending review requests: %w", err)
+		}
+		if err := d.store.ReplaceAllReviewerReadiness(ctx, nil); err != nil {
+			laneErrors = append(laneErrors, fmt.Errorf("clear reviewer readiness: %w", err))
+		}
+		if canceled > 0 {
+			d.logger.Info("pending review requests canceled because auto review is disabled", "count", canceled)
+		}
 	}
 	for _, repository := range d.cfg.Repositories {
 		owner, repo, _ := repository.OwnerRepo()
@@ -83,8 +99,10 @@ func (d *Dispatcher) Once(ctx context.Context, dryRun bool) error {
 			pullMap[pull.Number] = pull
 		}
 
-		if err := d.discoverReviewRounds(ctx, repository, pulls, dryRun); err != nil {
-			laneErrors = append(laneErrors, fmt.Errorf("%s review dispatch: %w", repository.GitHub, err))
+		if d.cfg.ReviewDispatch.IsEnabled() {
+			if err := d.discoverReviewRounds(ctx, repository, pulls, dryRun); err != nil {
+				laneErrors = append(laneErrors, fmt.Errorf("%s review dispatch: %w", repository.GitHub, err))
+			}
 		}
 		if err := d.discoverReviewComments(ctx, repository, owner, repo, pullMap, dryRun); err != nil {
 			laneErrors = append(laneErrors, fmt.Errorf("%s review comments: %w", repository.GitHub, err))
@@ -190,7 +208,7 @@ func (d *Dispatcher) discoverReviewComments(ctx context.Context, repository conf
 		if !ok || pull.Draft {
 			continue
 		}
-		if !hasFindingMarker(comment.Body, repository.FindingMarker) {
+		if !acceptReviewComment(repository, comment.Body) {
 			continue
 		}
 		issueKey, ok := issueKeyFromPull(d.cfg.Multica.Prefix, pull.Title, pull.Body)
@@ -330,6 +348,10 @@ func (d *Dispatcher) deliverOutbox(ctx context.Context) error {
 	var deliveryErrors []error
 	for _, item := range items {
 		if item.Kind == "review_request" {
+			if !d.cfg.ReviewDispatch.IsEnabled() {
+				deliveryErrors = append(deliveryErrors, fmt.Errorf("%s delivery blocked: auto review is disabled", item.EventKey))
+				continue
+			}
 			if d.reviewer == nil {
 				err := errors.New("review webhook client is not configured")
 				_ = d.store.RetryOutbox(ctx, item.ID, err.Error(), multica.RetryDelay(item.Attempts))
@@ -570,6 +592,10 @@ func issueKeyFromPull(prefix, title, body string) (string, bool) {
 func hasFindingMarker(body, marker string) bool {
 	pattern := regexp.MustCompile(`(?i)<!--\s*` + regexp.QuoteMeta(marker) + `(?:\s|-->)`)
 	return pattern.MatchString(body)
+}
+
+func acceptReviewComment(repository config.Repository, body string) bool {
+	return repository.ReviewCommentMode == "all" || hasFindingMarker(body, repository.FindingMarker)
 }
 
 func isActiveIssue(status string) bool {

@@ -139,6 +139,51 @@ func TestDashboardAcceptsWildcardListener(t *testing.T) {
 	}
 }
 
+func TestReviewDispatchCanBeDisabledWithoutReviewers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := `poll_interval: 1m
+bootstrap_lookback: 24h
+github:
+  auth: {type: env, name: GITHUB_TOKEN}
+  proxy: {type: none}
+multica:
+  server_url_env: MULTICA_SERVER_URL
+  workspace_id: workspace
+  workspace_prefix: SEEK
+  auth: {type: env, name: MULTICA_TOKEN}
+review_dispatch:
+  enabled: false
+repositories:
+  - github: owner/repo
+    review_comment_mode: all
+    process_changes_requested: true
+state_db: /tmp/state.db
+`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ReviewDispatch.IsEnabled() {
+		t.Fatal("automatic review dispatch should be disabled")
+	}
+	if cfg.Repositories[0].ReviewCommentMode != "all" {
+		t.Fatalf("unexpected review comment mode %q", cfg.Repositories[0].ReviewCommentMode)
+	}
+}
+
+func TestReviewCommentModeDefaultsToMarked(t *testing.T) {
+	cfg := validTestConfig(t, "")
+	if cfg.Repositories[0].ReviewCommentMode != "marked" {
+		t.Fatalf("unexpected review comment mode %q", cfg.Repositories[0].ReviewCommentMode)
+	}
+	if !cfg.ReviewDispatch.IsEnabled() {
+		t.Fatal("review dispatch must remain enabled when enabled is omitted")
+	}
+}
+
 func validTestConfig(t *testing.T, dashboard string) *Config {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "config.yaml")

@@ -225,9 +225,13 @@ function renderCursors(items) {
   }
 }
 
-function renderReviewerReadiness(items) {
+function renderReviewerReadiness(items, autoReviewEnabled) {
   const target = byId("reviewer-readiness");
   target.replaceChildren();
+  if (!autoReviewEnabled) {
+    target.append(node("div", "empty", "自动 PR review 已关闭；仅保留 review 意见回流。"));
+    return;
+  }
   const filtered = items.filter((item) => matches(
     item.agent_name,
     item.agent_status,
@@ -284,9 +288,10 @@ function render() {
   renderFeedback(payload.data.feedback);
   renderPolls(payload.data.poll_runs);
   renderCursors(payload.data.cursors);
-  renderReviewerReadiness(payload.data.reviewer_readiness || []);
+  renderReviewerReadiness(payload.data.reviewer_readiness || [], payload.auto_review_enabled);
   renderOutbox(payload.data.outbox);
-  setText("subtitle", `GitHub PR review · 可选 ${payload.workspace_prefix} 工单上下文 · 每 ${payload.poll_interval_seconds}s 轮询`);
+  const mode = payload.auto_review_enabled ? "自动 PR review 已开启" : "自动 PR review 已关闭，仅通知 review 意见";
+  setText("subtitle", `${mode} · ${payload.workspace_prefix} 工单关联 · 每 ${payload.poll_interval_seconds}s 轮询`);
   setText("updated", `数据生成于 ${formatTime(payload.data.generated_at)} · 自动刷新 ${payload.refresh_interval_seconds}s`);
   setText("version", `multica-github-dispatcher ${payload.version}`);
 }

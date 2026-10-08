@@ -29,6 +29,51 @@ func TestRoundAndOutboxAreIdempotent(t *testing.T) {
 	}
 }
 
+func TestCancelPendingReviewRequestsLeavesFeedbackDeliveries(t *testing.T) {
+	store, err := OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	round := Round{Repo: "owner/repo", PullNumber: 1, HeadSHA: "head", BaseSHA: "base", ReviewerIDs: []string{"agent"}}
+	created, err := store.CreateRound(ctx, round, []OutboxInput{{
+		EventKey: "review-request:key", Kind: "review_request", Body: "body", Marker: "agent",
+	}})
+	if err != nil || !created {
+		t.Fatalf("create round: created=%v err=%v", created, err)
+	}
+	feedback := FeedbackInput{
+		Repo: "owner/repo", EventID: 9, PullNumber: 1, IssueKey: "SEEK-9",
+		Body: "finding", Metadata: map[string]any{}, OccurredAt: time.Now(),
+	}
+	if _, err := store.IngestReviewComments(ctx, []FeedbackInput{feedback}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.PendingFeedback(ctx, 10)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending feedback=%+v err=%v", pending, err)
+	}
+	if err := store.QueueFeedback(ctx, pending[0], OutboxInput{
+		EventKey: "review_comment:owner/repo:9", Kind: "review_comment",
+		IssueKey: "SEEK-9", Body: "notify", Marker: "marker",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	canceled, err := store.CancelPendingReviewRequests(ctx)
+	if err != nil || canceled != 1 {
+		t.Fatalf("canceled=%d err=%v", canceled, err)
+	}
+	due, err := store.DueOutbox(ctx, 10)
+	if err != nil || len(due) != 1 || due[0].Kind != "review_comment" {
+		t.Fatalf("due outbox=%+v err=%v", due, err)
+	}
+	status, err := store.Status(ctx)
+	if err != nil || status.Outbox["canceled"] != 1 || status.Outbox["pending"] != 1 {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+}
+
 func TestCommentEditDoesNotCreateSecondEvent(t *testing.T) {
 	store, err := OpenMemory()
 	if err != nil {

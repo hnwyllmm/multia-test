@@ -20,11 +20,16 @@ import (
 )
 
 type fakeMulticaClient struct {
-	agents   []multica.Agent
-	runtimes []multica.Runtime
+	agents        []multica.Agent
+	runtimes      []multica.Runtime
+	issue         *multica.Issue
+	addedComments []string
 }
 
 func (f *fakeMulticaClient) GetIssue(context.Context, string) (multica.Issue, error) {
+	if f.issue != nil {
+		return *f.issue, nil
+	}
 	return multica.Issue{}, errors.New("not found")
 }
 
@@ -43,7 +48,10 @@ func (f *fakeMulticaClient) GetSquad(context.Context, string) (multica.Squad, er
 func (f *fakeMulticaClient) ListComments(context.Context, string) ([]multica.Comment, error) {
 	return nil, nil
 }
-func (f *fakeMulticaClient) AddComment(context.Context, string, string) error { return nil }
+func (f *fakeMulticaClient) AddComment(_ context.Context, _ string, body string) error {
+	f.addedComments = append(f.addedComments, body)
+	return nil
+}
 
 func TestIssueKeyFromPull(t *testing.T) {
 	for _, test := range []struct {
@@ -71,6 +79,17 @@ func TestFindingMarkerIsHiddenAndPositionIndependent(t *testing.T) {
 	}
 	if hasFindingMarker("multica:fix old visible prefix", "automated-review-finding:v1") {
 		t.Fatal("legacy visible prefix must not qualify")
+	}
+}
+
+func TestReviewCommentModeAllAcceptsUnmarkedComments(t *testing.T) {
+	repository := config.Repository{ReviewCommentMode: "all", FindingMarker: "automated-review-finding:v1"}
+	if !acceptReviewComment(repository, "Codex Connector found a bug") {
+		t.Fatal("all mode should accept an unmarked review comment")
+	}
+	repository.ReviewCommentMode = "marked"
+	if acceptReviewComment(repository, "Codex Connector found a bug") {
+		t.Fatal("marked mode should reject an unmarked review comment")
 	}
 }
 
@@ -287,6 +306,73 @@ func TestPullWithoutMulticaIssueDispatchesReviewOnce(t *testing.T) {
 	}
 	if webhookPayload.MulticaIssue != nil || webhookPayload.PullRequest.HeadSHA != "head-sha" {
 		t.Fatalf("unexpected webhook payload %+v", webhookPayload)
+	}
+}
+
+func TestDisabledReviewDispatchStillNotifiesIssueForUnmarkedComment(t *testing.T) {
+	t.Setenv("TEST_GITHUB_TOKEN", "github-token")
+	now := time.Now().UTC().Format(time.RFC3339)
+	githubAPI := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/repos/owner/repo/pulls":
+			_, _ = io.WriteString(writer, `[{"number":9,"title":"Fix race","body":"Tracks SEEK-9","html_url":"https://github.com/owner/repo/pull/9","state":"open","draft":false,"head":{"sha":"head-sha","ref":"feature"},"base":{"sha":"base-sha","ref":"main"},"created_at":"`+now+`","updated_at":"`+now+`","user":{"login":"alice"}}]`)
+		case "/repos/owner/repo/pulls/comments":
+			_, _ = io.WriteString(writer, `[{"id":901,"body":"Codex Connector found a race","html_url":"https://github.com/owner/repo/pull/9#discussion_r901","path":"worker.go","line":12,"commit_id":"head-sha","original_commit_id":"head-sha","pull_request_url":"https://api.github.com/repos/owner/repo/pulls/9","created_at":"`+now+`","updated_at":"`+now+`","user":{"login":"chatgpt-codex-connector[bot]"}}]`)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer githubAPI.Close()
+	githubClient, err := gh.New(config.GitHubConfig{
+		APIBaseURL: githubAPI.URL,
+		Auth:       config.SecretRef{Type: "env", Name: "TEST_GITHUB_TOKEN"},
+		Proxy: config.ProxyConfig{
+			Type: "none", RequestTimeout: config.Duration{Duration: time.Second},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := false
+	cfg := &config.Config{
+		BootstrapLookback: config.Duration{Duration: 24 * time.Hour},
+		Multica:           config.MulticaConfig{Prefix: "SEEK"},
+		ReviewDispatch:    config.ReviewDispatchConfig{Enabled: &enabled},
+		Repositories: []config.Repository{{
+			GitHub: "owner/repo", ReviewCommentMode: "all", FindingMarker: "automated-review-finding:v1",
+		}},
+	}
+	store, err := state.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	multicaClient := &fakeMulticaClient{
+		agents: []multica.Agent{{ID: "worker", Name: "Test Worker"}},
+		issue: &multica.Issue{
+			ID: "issue-id", Identifier: "SEEK-9", Status: "in_progress",
+			AssigneeType: "agent", AssigneeID: "worker",
+		},
+	}
+	worker := New(cfg, githubClient, multicaClient, nil, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := worker.Once(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if len(multicaClient.addedComments) != 1 {
+		t.Fatalf("notifications=%d, want 1", len(multicaClient.addedComments))
+	}
+	notification := multicaClient.addedComments[0]
+	if !strings.Contains(notification, "https://github.com/owner/repo/pull/9#discussion_r901") ||
+		strings.Contains(notification, "Codex Connector found a race") {
+		t.Fatalf("unexpected notification %q", notification)
+	}
+	dashboard, err := store.Dashboard(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dashboard.Summary.Rounds != 0 || dashboard.Summary.Feedback != 1 || len(dashboard.Feedback) != 1 || dashboard.Feedback[0].DeliveryStatus != "delivered" {
+		t.Fatalf("unexpected dashboard state %+v", dashboard)
 	}
 }
 

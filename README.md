@@ -4,7 +4,8 @@
 Multica issues and starts reviewer Agents through `run_only` Autopilot
 webhooks. A Multica issue is optional context, not a prerequisite for review.
 
-It runs two independent polling lanes:
+It runs two independent polling lanes. Set `review_dispatch.enabled: false` to
+stop the first lane without stopping GitHub feedback delivery:
 
 1. A new open PR, or a new head SHA on an existing PR, creates one review
    round. Reviewers are selected deterministically from the repository's
@@ -12,13 +13,15 @@ It runs two independent polling lanes:
    or body contains a key such as `WANG-2`, the dispatcher fetches that issue
    and adds its context to the review payload. A clean review creates no GitHub
    or Multica comment.
-2. An actionable inline finding carries a hidden
-   `automated-review-finding:v1` HTML marker while keeping ordinary visible
-   review text. If the PR has an associated active Multica issue, that finding
-   or a `CHANGES_REQUESTED` review mentions the issue's current assignee with a
-   link to GitHub; the GitHub review body is not copied into the issue. Mention
-   routing uses the assignee ID, so a private Agent can still be awakened even
-   when the dispatcher's member-scoped token cannot list its display name.
+2. If the PR has an associated active Multica issue, qualifying inline review
+   comments and `CHANGES_REQUESTED` reviews mention the issue's current
+   assignee with a link to GitHub; the GitHub review body is not copied into the
+   issue. `review_comment_mode: marked` accepts only findings carrying the
+   hidden `automated-review-finding:v1` marker. `review_comment_mode: all`
+   accepts unmarked inline comments too, including comments produced by Codex
+   Connector. Mention routing uses the assignee ID, so a private Agent can
+   still be awakened even when the dispatcher's member-scoped token cannot
+   list its display name.
 
 The dispatcher never exposes an inbound event port. GitHub is read through its
 REST API, reviewer webhooks are outbound HTTP(S) requests, and optional Multica
@@ -37,9 +40,12 @@ go build -o multica-github-dispatcher ./cmd/multica-github-dispatcher
 
 ## Configuration
 
-Copy [`deploy/config.example.yaml`](deploy/config.example.yaml), configure the
-repositories and reviewer IDs, and map every reviewer to a secret-backed
-Autopilot webhook URL. Secrets are references, not literal YAML values.
+Copy [`deploy/config.example.yaml`](deploy/config.example.yaml) and configure
+the repositories. When `review_dispatch.enabled` is true, configure reviewer
+IDs and map every reviewer to a secret-backed Autopilot webhook URL. When it is
+false, reviewer agents, webhook secrets, OCR settings, and review rounds are
+not required; feedback polling and Multica issue notifications remain active.
+Secrets are references, not literal YAML values.
 
 The GitHub proxy is entirely user supplied. The dispatcher does not create or
 modify a proxy:
@@ -56,11 +62,11 @@ The GitHub client has its own transport. Every Multica CLI child explicitly
 removes standard proxy variables, so the GitHub route cannot accidentally be
 used for `antmultica.alipay.com`.
 
-The service validates `GET /rate_limit` through the selected route and resolves
-all reviewer webhook secrets before migrating SQLite or polling. Multica
+The service validates `GET /rate_limit` through the selected route. It resolves
+reviewer webhook secrets only when automatic review is enabled. Multica
 workspace validation is optional: a failure removes issue context and feedback
-routing for that cycle but does not stop independent PR review. GitHub failures
-do not advance cursors.
+routing for that cycle but does not stop GitHub polling. GitHub failures do not
+advance cursors.
 
 ## Credentials
 
@@ -92,9 +98,9 @@ multica-github-dispatcher dashboard --config /path/to/config.yaml
 multica-github-dispatcher status --config /path/to/config.yaml
 ```
 
-`--dry-run` performs live GitHub and reviewer configuration checks and
-discovery, but uses an in-memory state database and sends no reviewer webhook
-or Multica comment.
+`--dry-run` performs live GitHub discovery and, when enabled, reviewer
+configuration checks. It uses an in-memory state database and sends no reviewer
+webhook or Multica comment.
 
 ## State and idempotency
 

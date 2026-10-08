@@ -22,6 +22,7 @@ multica:
     name: MULTICA_TOKEN
 
 review_dispatch:
+  enabled: true
   request_timeout: 30s
   agents:
     - id: REPLACE_WITH_REVIEWER_A_AGENT_ID
@@ -48,6 +49,7 @@ repositories:
     review_engine: ocr_delegate
     ocr_version: "1.12.8"
     finding_marker: "automated-review-finding:v1"
+    review_comment_mode: marked
     process_changes_requested: true
     trust_mode: any
 
