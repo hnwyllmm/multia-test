@@ -318,7 +318,7 @@ func TestDisabledReviewDispatchStillNotifiesIssueForUnmarkedComment(t *testing.T
 		case "/repos/owner/repo/pulls":
 			_, _ = io.WriteString(writer, `[{"number":9,"title":"Fix race","body":"Tracks SEEK-9","html_url":"https://github.com/owner/repo/pull/9","state":"open","draft":false,"head":{"sha":"head-sha","ref":"feature"},"base":{"sha":"base-sha","ref":"main"},"created_at":"`+now+`","updated_at":"`+now+`","user":{"login":"alice"}}]`)
 		case "/repos/owner/repo/pulls/comments":
-			_, _ = io.WriteString(writer, `[{"id":901,"body":"Codex Connector found a race","html_url":"https://github.com/owner/repo/pull/9#discussion_r901","path":"worker.go","line":12,"commit_id":"head-sha","original_commit_id":"head-sha","pull_request_url":"https://api.github.com/repos/owner/repo/pulls/9","created_at":"`+now+`","updated_at":"`+now+`","user":{"login":"chatgpt-codex-connector[bot]"}}]`)
+			_, _ = io.WriteString(writer, `[{"id":901,"body":"Codex Connector found a race","html_url":"https://github.com/owner/repo/pull/9#discussion_r901","path":"worker.go","line":12,"commit_id":"head-sha","original_commit_id":"head-sha","pull_request_url":"https://api.github.com/repos/owner/repo/pulls/9","created_at":"`+now+`","updated_at":"`+now+`","user":{"login":"chatgpt-codex-connector[bot]"}},{"id":902,"in_reply_to_id":901,"body":"I fixed this","html_url":"https://github.com/owner/repo/pull/9#discussion_r902","path":"worker.go","line":12,"commit_id":"head-sha","original_commit_id":"head-sha","pull_request_url":"https://api.github.com/repos/owner/repo/pulls/9","created_at":"`+now+`","updated_at":"`+now+`","user":{"login":"alice"}}]`)
 		default:
 			http.NotFound(writer, request)
 		}

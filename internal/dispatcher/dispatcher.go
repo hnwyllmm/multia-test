@@ -205,7 +205,7 @@ func (d *Dispatcher) discoverReviewComments(ctx context.Context, repository conf
 	var inputs []state.FeedbackInput
 	for _, comment := range comments {
 		pull, ok := pulls[comment.PullNumber]
-		if !ok || pull.Draft {
+		if !ok || pull.Draft || comment.InReplyToID != nil {
 			continue
 		}
 		if !acceptReviewComment(repository, comment.Body) {

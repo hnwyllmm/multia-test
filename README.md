@@ -18,8 +18,9 @@ stop the first lane without stopping GitHub feedback delivery:
    assignee with a link to GitHub; the GitHub review body is not copied into the
    issue. `review_comment_mode: marked` accepts only findings carrying the
    hidden `automated-review-finding:v1` marker. `review_comment_mode: all`
-   accepts unmarked inline comments too, including comments produced by Codex
-   Connector. Mention routing uses the assignee ID, so a private Agent can
+   accepts unmarked root inline comments too, including comments produced by
+   Codex Connector. Thread replies are ignored so a worker's own reply cannot
+   wake it again. Mention routing uses the assignee ID, so a private Agent can
    still be awakened even when the dispatcher's member-scoped token cannot
    list its display name.
 

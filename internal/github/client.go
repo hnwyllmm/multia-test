@@ -56,6 +56,7 @@ type ReviewComment struct {
 	OriginalLine     *int
 	CommitID         string
 	OriginalCommitID string
+	InReplyToID      *int64
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 }
@@ -158,6 +159,7 @@ func (c *Client) ListReviewComments(ctx context.Context, owner, repo string, sin
 		OriginalLine   *int   `json:"original_line"`
 		CommitID       string `json:"commit_id"`
 		OriginalCommit string `json:"original_commit_id"`
+		InReplyToID    *int64 `json:"in_reply_to_id"`
 		PullRequestURL string `json:"pull_request_url"`
 		User           struct {
 			Login string `json:"login"`
@@ -178,7 +180,8 @@ func (c *Client) ListReviewComments(ctx context.Context, owner, repo string, sin
 			ID: item.ID, PullNumber: number, Body: item.Body, HTMLURL: item.HTMLURL,
 			Author: item.User.Login, Path: item.Path, Line: item.Line, OriginalLine: item.OriginalLine,
 			CommitID: item.CommitID, OriginalCommitID: item.OriginalCommit,
-			CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
+			InReplyToID: item.InReplyToID,
+			CreatedAt:   item.CreatedAt, UpdatedAt: item.UpdatedAt,
 		})
 	}
 	return result, nil
