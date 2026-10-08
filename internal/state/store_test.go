@@ -96,6 +96,51 @@ func TestCommentEditDoesNotCreateSecondEvent(t *testing.T) {
 	}
 }
 
+func TestCIFailureIsRecordedOncePerPullHead(t *testing.T) {
+	store, err := OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	checkedAt := time.Date(2026, 10, 8, 8, 0, 0, 0, time.UTC)
+	due, err := store.CIPollDue(ctx, "owner/repo", 9, "head-sha", checkedAt, 2*time.Minute)
+	if err != nil || !due {
+		t.Fatalf("initial due=%v err=%v", due, err)
+	}
+	failure := &CIFailureInput{
+		Repo: "owner/repo", EventID: "9@head-sha", PullNumber: 9, HeadSHA: "head-sha",
+		IssueKey: "SEEK-9", Body: "build: failure",
+		Metadata: map[string]any{"url": "https://example.invalid/check"}, OccurredAt: checkedAt,
+	}
+	inserted, err := store.RecordCIPoll(ctx, "owner/repo", 9, "head-sha", checkedAt, failure)
+	if err != nil || !inserted {
+		t.Fatalf("first CI record inserted=%v err=%v", inserted, err)
+	}
+	due, err = store.CIPollDue(ctx, "owner/repo", 9, "head-sha", checkedAt.Add(time.Minute), 2*time.Minute)
+	if err != nil || due {
+		t.Fatalf("early due=%v err=%v", due, err)
+	}
+	inserted, err = store.RecordCIPoll(ctx, "owner/repo", 9, "head-sha", checkedAt.Add(2*time.Minute), failure)
+	if err != nil || inserted {
+		t.Fatalf("duplicate CI record inserted=%v err=%v", inserted, err)
+	}
+	pending, err := store.PendingFeedback(ctx, 10)
+	if err != nil || len(pending) != 1 || pending[0].Kind != "ci_failure" || pending[0].EventID != "9@head-sha" {
+		t.Fatalf("pending=%+v err=%v", pending, err)
+	}
+	if err := store.QueueFeedback(ctx, pending[0], OutboxInput{
+		EventKey: "ci_failure:owner/repo:9@head-sha", Kind: "ci_failure",
+		IssueKey: "SEEK-9", Body: "notify", Marker: "marker",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status, err := store.Status(ctx)
+	if err != nil || status.CIFailures["queued"] != 1 || status.Outbox["pending"] != 1 {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+}
+
 func TestQueueFeedbackIsTransactional(t *testing.T) {
 	store, err := OpenMemory()
 	if err != nil {

@@ -71,6 +71,25 @@ type Review struct {
 	SubmittedAt time.Time
 }
 
+type CheckRun struct {
+	ID          int64
+	Name        string
+	Status      string
+	Conclusion  string
+	HTMLURL     string
+	StartedAt   time.Time
+	CompletedAt time.Time
+}
+
+type CommitStatus struct {
+	ID        int64
+	Context   string
+	State     string
+	TargetURL string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 func New(cfg config.GitHubConfig) (*Client, error) {
 	transport, proxyLabel, err := newTransport(cfg.Proxy)
 	if err != nil {
@@ -208,6 +227,62 @@ func (c *Client) ListReviews(ctx context.Context, owner, repo string, pullNumber
 		result = append(result, Review{
 			ID: item.ID, Body: item.Body, State: item.State, HTMLURL: item.HTMLURL,
 			Author: item.User.Login, CommitID: item.CommitID, SubmittedAt: item.SubmittedAt,
+		})
+	}
+	return result, nil
+}
+
+func (c *Client) ListCheckRuns(ctx context.Context, owner, repo, ref string) ([]CheckRun, error) {
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/commits/%s/check-runs?filter=latest&per_page=100",
+		c.baseURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(ref))
+	var raw struct {
+		CheckRuns []struct {
+			ID          int64      `json:"id"`
+			Name        string     `json:"name"`
+			Status      string     `json:"status"`
+			Conclusion  string     `json:"conclusion"`
+			HTMLURL     string     `json:"html_url"`
+			StartedAt   time.Time  `json:"started_at"`
+			CompletedAt *time.Time `json:"completed_at"`
+		} `json:"check_runs"`
+	}
+	if err := c.getJSON(ctx, endpoint, &raw); err != nil {
+		return nil, fmt.Errorf("list check runs for commit %s: %w", ref, err)
+	}
+	result := make([]CheckRun, 0, len(raw.CheckRuns))
+	for _, item := range raw.CheckRuns {
+		completedAt := time.Time{}
+		if item.CompletedAt != nil {
+			completedAt = *item.CompletedAt
+		}
+		result = append(result, CheckRun{
+			ID: item.ID, Name: item.Name, Status: item.Status,
+			Conclusion: item.Conclusion, HTMLURL: item.HTMLURL,
+			StartedAt: item.StartedAt, CompletedAt: completedAt,
+		})
+	}
+	return result, nil
+}
+
+func (c *Client) ListCommitStatuses(ctx context.Context, owner, repo, ref string) ([]CommitStatus, error) {
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/commits/%s/statuses?per_page=100",
+		c.baseURL, url.PathEscape(owner), url.PathEscape(repo), url.PathEscape(ref))
+	var raw []struct {
+		ID        int64     `json:"id"`
+		Context   string    `json:"context"`
+		State     string    `json:"state"`
+		TargetURL string    `json:"target_url"`
+		CreatedAt time.Time `json:"created_at"`
+		UpdatedAt time.Time `json:"updated_at"`
+	}
+	if err := c.getAll(ctx, endpoint, &raw); err != nil {
+		return nil, fmt.Errorf("list commit statuses for commit %s: %w", ref, err)
+	}
+	result := make([]CommitStatus, 0, len(raw))
+	for _, item := range raw {
+		result = append(result, CommitStatus{
+			ID: item.ID, Context: item.Context, State: item.State,
+			TargetURL: item.TargetURL, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
 		})
 	}
 	return result, nil

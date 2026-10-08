@@ -147,6 +147,7 @@ type Repository struct {
 	FindingMarker           string   `yaml:"finding_marker"`
 	ReviewCommentMode       string   `yaml:"review_comment_mode"`
 	ProcessChangesRequested bool     `yaml:"process_changes_requested"`
+	ProcessCIFailures       bool     `yaml:"process_ci_failures"`
 	TrustMode               string   `yaml:"trust_mode"`
 }
 
@@ -180,6 +181,7 @@ func (r Repository) AllowsTargetBranch(branch string) bool {
 type Config struct {
 	PollInterval      Duration             `yaml:"poll_interval"`
 	BootstrapLookback Duration             `yaml:"bootstrap_lookback"`
+	CIPollInterval    Duration             `yaml:"ci_poll_interval"`
 	GitHub            GitHubConfig         `yaml:"github"`
 	Multica           MulticaConfig        `yaml:"multica"`
 	ReviewDispatch    ReviewDispatchConfig `yaml:"review_dispatch"`
@@ -211,6 +213,9 @@ func (c *Config) setDefaultsAndValidate() error {
 	}
 	if c.BootstrapLookback.Duration == 0 {
 		c.BootstrapLookback.Duration = 24 * time.Hour
+	}
+	if c.CIPollInterval.Duration == 0 {
+		c.CIPollInterval.Duration = 2 * time.Minute
 	}
 	if c.GitHub.APIBaseURL == "" {
 		c.GitHub.APIBaseURL = defaultGitHubAPIBaseURL

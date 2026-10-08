@@ -1,5 +1,6 @@
 poll_interval: 60s
 bootstrap_lookback: 24h
+ci_poll_interval: 2m
 
 github:
   auth:
@@ -54,6 +55,7 @@ repositories:
     finding_marker: "automated-review-finding:v1"
     review_comment_mode: marked
     process_changes_requested: true
+    process_ci_failures: true
     trust_mode: any
 
 state_db: /data/wangyunlai.wyl/multica-github-dispatcher/state.db
