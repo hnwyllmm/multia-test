@@ -205,15 +205,9 @@ func (c *Config) setDefaultsAndValidate() error {
 	if c.Dashboard.Listen == "" {
 		c.Dashboard.Listen = "127.0.0.1:8787"
 	}
-	host, port, err := net.SplitHostPort(c.Dashboard.Listen)
+	_, port, err := net.SplitHostPort(c.Dashboard.Listen)
 	if err != nil || port == "" {
 		return errors.New("dashboard.listen must be a host:port address")
-	}
-	if host != "localhost" {
-		ip := net.ParseIP(host)
-		if ip == nil || !ip.IsLoopback() {
-			return errors.New("dashboard.listen must use a loopback address; use SSH port forwarding for remote access")
-		}
 	}
 	if c.Dashboard.RefreshInterval.Duration == 0 {
 		c.Dashboard.RefreshInterval.Duration = 10 * time.Second

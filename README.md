@@ -16,7 +16,7 @@ It runs two independent polling lanes:
 
 The dispatcher never exposes an HTTP port. GitHub is read through its REST API;
 Multica writes are performed by the `multica` CLI. An optional read-only
-dashboard is a separate process bound to loopback only.
+dashboard is a separate process with a configurable listener.
 
 ## Build and test
 
@@ -96,8 +96,13 @@ The dashboard shows repository and PR review rounds, linked Multica issues,
 GitHub feedback, delivery retries, cursors, and recent poll health. It reads
 SQLite directly and does not require GitHub or Multica credentials.
 
-The listener must be a loopback address. To open the dev-host dashboard from a
-workstation:
+The listener defaults to `127.0.0.1:8787`. Set it to `0.0.0.0:8787` to expose
+the dashboard on every dev-host IPv4 interface, then open
+`http://<dev-host>:8787` directly. The dashboard has no built-in authentication,
+so a wildcard listener should only be used on a trusted network or with an
+external firewall.
+
+For a loopback listener, access it from a workstation with:
 
 ```bash
 ssh -N -L 8787:127.0.0.1:8787 dev
@@ -128,7 +133,7 @@ worker instruction templates are in [`deploy/agent-instructions`](deploy/agent-i
 and [`deploy/multica-github-dashboard.service`](deploy/multica-github-dashboard.service)
 are user-service templates for the dev host. Both restart on failure and log to
 journald. The dispatcher uses a process lock next to the database; the dashboard
-is read-only and listens only on `127.0.0.1`.
+is read-only and listens on the address configured by `dashboard.listen`.
 
 ```bash
 systemctl --user daemon-reload

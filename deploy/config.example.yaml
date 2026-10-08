@@ -21,7 +21,7 @@ multica:
     name: MULTICA_TOKEN
 
 dashboard:
-  listen: 127.0.0.1:8787
+  listen: 0.0.0.0:8787
   refresh_interval: 10s
 
 repositories:

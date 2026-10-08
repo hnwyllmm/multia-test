@@ -119,14 +119,18 @@ func TestDashboardDefaultsToLoopback(t *testing.T) {
 	}
 }
 
-func TestDashboardRejectsNonLoopbackListener(t *testing.T) {
+func TestDashboardAcceptsWildcardListener(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	data := validConfigYAML("dashboard:\n  listen: 0.0.0.0:8787\n")
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "loopback") {
-		t.Fatalf("expected loopback validation error, got %v", err)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Dashboard.Listen != "0.0.0.0:8787" {
+		t.Fatalf("unexpected dashboard address %q", cfg.Dashboard.Listen)
 	}
 }
 
