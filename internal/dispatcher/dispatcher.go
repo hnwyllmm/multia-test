@@ -864,6 +864,7 @@ func feedbackMessage(item state.PendingFeedback, mention string) (string, string
 	markerKind := "github-review-comment-dispatch"
 	idName := "comment"
 	prompt := "有新的 Review 意见"
+	followUp := ""
 	if item.Kind == "review" {
 		markerKind = "github-review-dispatch"
 		idName = "review"
@@ -871,6 +872,7 @@ func feedbackMessage(item state.PendingFeedback, mention string) (string, string
 		markerKind = "github-ci-failure-dispatch"
 		idName = "event"
 		prompt = "CI 失败"
+		followUp = "\n\n请确保 CI 成功，如有必要请重试。"
 	}
 	marker := fmt.Sprintf("<!-- %s:v1 repo=%s %s=%s -->", markerKind, item.Repo, idName, item.EventID)
 	url := strings.TrimSpace(stringMetadata(item.Metadata, "url"))
@@ -883,9 +885,9 @@ func feedbackMessage(item state.PendingFeedback, mention string) (string, string
 	}
 	body := fmt.Sprintf(`%sPR %s#%d %s，请打开 GitHub 链接查看并处理：
 
-%s
+%s%s
 
-%s`, prefix, item.Repo, item.PullNumber, prompt, url, marker)
+%s`, prefix, item.Repo, item.PullNumber, prompt, url, followUp, marker)
 	return marker, body
 }
 

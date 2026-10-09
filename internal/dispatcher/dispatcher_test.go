@@ -217,8 +217,9 @@ func TestFeedbackMessageLinksWithoutCopyingBody(t *testing.T) {
 		!strings.Contains(body, "[@Worker](mention://agent/id)") || !strings.Contains(body, marker) {
 		t.Fatalf("feedback notification is incomplete: %s", body)
 	}
-	if strings.Contains(body, rawBody) || strings.Contains(body, "GitHub review body") {
-		t.Fatalf("feedback copied the GitHub review body: %s", body)
+	if strings.Contains(body, rawBody) || strings.Contains(body, "GitHub review body") ||
+		strings.Contains(body, "请确保 CI 成功") {
+		t.Fatalf("review feedback contains unexpected content: %s", body)
 	}
 }
 
@@ -479,6 +480,7 @@ func TestCIFailureNotifiesIssueOncePerHead(t *testing.T) {
 	}
 	notification := multicaClient.addedComments[0]
 	if !strings.Contains(notification, "CI 失败") ||
+		!strings.Contains(notification, "请确保 CI 成功，如有必要请重试。") ||
 		!strings.Contains(notification, "https://github.com/owner/repo/actions/runs/77") ||
 		strings.Contains(notification, "build: failure") ||
 		!strings.Contains(notification, "[@Test Worker](mention://agent/worker)") {
