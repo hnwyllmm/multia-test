@@ -17,21 +17,23 @@ type Store struct {
 }
 
 type OutboxInput struct {
-	EventKey string
-	Kind     string
-	IssueKey string
-	Body     string
-	Marker   string
+	EventKey        string
+	Kind            string
+	IssueKey        string
+	ParentCommentID string
+	Body            string
+	Marker          string
 }
 
 type OutboxItem struct {
-	ID       int64
-	EventKey string
-	Kind     string
-	IssueKey string
-	Body     string
-	Marker   string
-	Attempts int
+	ID              int64
+	EventKey        string
+	Kind            string
+	IssueKey        string
+	ParentCommentID string
+	Body            string
+	Marker          string
+	Attempts        int
 }
 
 type Round struct {
@@ -139,16 +141,17 @@ type DashboardFeedback struct {
 }
 
 type DashboardOutbox struct {
-	ID            int64  `json:"id"`
-	EventKey      string `json:"event_key"`
-	Kind          string `json:"kind"`
-	IssueKey      string `json:"issue_key"`
-	Status        string `json:"status"`
-	Attempts      int    `json:"attempts"`
-	NextAttemptAt string `json:"next_attempt_at,omitempty"`
-	LastError     string `json:"last_error,omitempty"`
-	CreatedAt     string `json:"created_at"`
-	UpdatedAt     string `json:"updated_at"`
+	ID              int64  `json:"id"`
+	EventKey        string `json:"event_key"`
+	Kind            string `json:"kind"`
+	IssueKey        string `json:"issue_key"`
+	ParentCommentID string `json:"parent_comment_id,omitempty"`
+	Status          string `json:"status"`
+	Attempts        int    `json:"attempts"`
+	NextAttemptAt   string `json:"next_attempt_at,omitempty"`
+	LastError       string `json:"last_error,omitempty"`
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
 }
 
 type DashboardPollRun struct {
@@ -298,6 +301,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			event_key TEXT NOT NULL UNIQUE,
 			kind TEXT NOT NULL,
 			issue_key TEXT NOT NULL,
+			parent_comment_id TEXT NOT NULL DEFAULT '',
 			body TEXT NOT NULL,
 			marker TEXT NOT NULL,
 			status TEXT NOT NULL,
@@ -338,7 +342,57 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate sqlite: %w", err)
 		}
 	}
+	if err := s.ensureColumn(ctx, "outbox", "parent_comment_id",
+		`ALTER TABLE outbox ADD COLUMN parent_comment_id TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *Store) ensureColumn(ctx context.Context, table, column, alterStatement string) error {
+	found, err := s.hasColumn(ctx, table, column)
+	if err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, alterStatement); err != nil {
+		// The dashboard and dispatcher can start together and race the same
+		// additive migration. Treat a concurrently added column as success.
+		if found, inspectErr := s.hasColumn(ctx, table, column); inspectErr == nil && found {
+			return nil
+		}
+		return fmt.Errorf("add sqlite column %s.%s: %w", table, column, err)
+	}
+	return nil
+}
+
+func (s *Store) hasColumn(ctx context.Context, table, column string) (bool, error) {
+	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return false, fmt.Errorf("inspect sqlite table %s: %w", table, err)
+	}
+	found := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, dataType string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return false, fmt.Errorf("inspect sqlite table %s: %w", table, err)
+		}
+		if name == column {
+			found = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return false, err
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return found, nil
 }
 
 func (s *Store) HasRound(ctx context.Context, repo string, pullNumber int, headSHA string) (bool, error) {
@@ -602,7 +656,7 @@ func (s *Store) DueOutbox(ctx context.Context, limit int) ([]OutboxItem, error) 
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, event_key, kind, issue_key, body, marker, attempts
+	rows, err := s.db.QueryContext(ctx, `SELECT id, event_key, kind, issue_key, parent_comment_id, body, marker, attempts
 		FROM outbox WHERE status='pending' AND (next_attempt_at IS NULL OR next_attempt_at<=?)
 		ORDER BY id ASC LIMIT ?`, timestamp(time.Now()), limit)
 	if err != nil {
@@ -612,7 +666,7 @@ func (s *Store) DueOutbox(ctx context.Context, limit int) ([]OutboxItem, error) 
 	var result []OutboxItem
 	for rows.Next() {
 		var item OutboxItem
-		if err := rows.Scan(&item.ID, &item.EventKey, &item.Kind, &item.IssueKey,
+		if err := rows.Scan(&item.ID, &item.EventKey, &item.Kind, &item.IssueKey, &item.ParentCommentID,
 			&item.Body, &item.Marker, &item.Attempts); err != nil {
 			return nil, err
 		}
@@ -636,6 +690,13 @@ func (s *Store) DeliverOutbox(ctx context.Context, id int64) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE outbox SET status='delivered', last_error='', next_attempt_at=NULL, updated_at=? WHERE id=?`,
 		timestamp(time.Now()), id)
+	return err
+}
+
+func (s *Store) CancelOutbox(ctx context.Context, id int64, reason string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE outbox SET status='canceled', last_error=?, next_attempt_at=NULL, updated_at=? WHERE id=?`,
+		truncate(reason, 1000), timestamp(time.Now()), id)
 	return err
 }
 
@@ -980,7 +1041,7 @@ func (s *Store) dashboardFeedback(ctx context.Context, limit int) ([]DashboardFe
 }
 
 func (s *Store) dashboardOutbox(ctx context.Context, limit int) ([]DashboardOutbox, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, event_key, kind, issue_key, status,
+	rows, err := s.db.QueryContext(ctx, `SELECT id, event_key, kind, issue_key, parent_comment_id, status,
 		attempts, next_attempt_at, last_error, created_at, updated_at
 		FROM outbox ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
@@ -991,7 +1052,7 @@ func (s *Store) dashboardOutbox(ctx context.Context, limit int) ([]DashboardOutb
 	for rows.Next() {
 		var item DashboardOutbox
 		var next sql.NullString
-		if err := rows.Scan(&item.ID, &item.EventKey, &item.Kind, &item.IssueKey,
+		if err := rows.Scan(&item.ID, &item.EventKey, &item.Kind, &item.IssueKey, &item.ParentCommentID,
 			&item.Status, &item.Attempts, &next, &item.LastError,
 			&item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
@@ -1070,9 +1131,9 @@ func firstMeaningfulLine(value string, limit int) string {
 
 func insertOutbox(ctx context.Context, tx *sql.Tx, item OutboxInput, now string) error {
 	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox
-		(event_key, kind, issue_key, body, marker, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`,
-		item.EventKey, item.Kind, item.IssueKey, item.Body, item.Marker, now, now)
+		(event_key, kind, issue_key, parent_comment_id, body, marker, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+		item.EventKey, item.Kind, item.IssueKey, item.ParentCommentID, item.Body, item.Marker, now, now)
 	return err
 }
 

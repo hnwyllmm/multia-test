@@ -19,7 +19,12 @@ to stop the first lane without stopping GitHub feedback delivery:
    to the dispatcher, the comment includes its real Multica mention. A private
    or otherwise invisible assignee receives a plain comment, never a synthetic
    mention. The dispatcher does not call `issue rerun`, so comment-only delivery
-   does not guarantee that a private Agent starts a new run. `review_comment_mode: marked`
+   does not guarantee that a private Agent starts a new run. For Workflow issues,
+   it matches the PR URL to the active producing Attempt and replies under that
+   Attempt's thread root. If that Attempt has finished while the Workflow remains
+   active, it replies to the Run collaboration thread for the Team Leader. An
+   inactive issue or completed Workflow cancels the pending notification instead
+   of retrying forever. `review_comment_mode: marked`
    accepts only findings carrying the hidden `automated-review-finding:v1`
    marker. `review_comment_mode: all` accepts unmarked root inline comments
    too, including comments produced by Codex Connector. Thread replies are
@@ -132,6 +137,9 @@ the per-repository review-comment cursor avoids boundary loss. Review webhook
 requests carry the round event key in both JSON and the `Idempotency-Key`
 header. Multica feedback comments carry HTML markers; the outbox checks those
 markers before retries to prevent duplicate comments after an ambiguous write.
+Workflow reply parents are stored with the outbox item. Delivery refreshes the
+issue and Workflow state before writing; a Workflow top-level-comment conflict
+is terminal rather than retryable.
 
 ## Read-only dashboard
 
