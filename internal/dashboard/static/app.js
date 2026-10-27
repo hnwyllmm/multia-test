@@ -154,7 +154,7 @@ function renderRounds(rounds, workspaceURL) {
   }
 }
 
-function renderFeedback(items) {
+function renderFeedback(items, workspaceURL) {
   const target = byId("feedback");
   target.replaceChildren();
   const filtered = items.filter((item) => matches(
@@ -180,7 +180,17 @@ function renderFeedback(items) {
     link.href = item.url || githubURL(item.repo, item.pull_number);
     link.target = "_blank";
     link.rel = "noreferrer";
-    title.append(link, document.createTextNode(` → ${item.issue_key}`));
+    title.append(link, document.createTextNode(" → "));
+    const issueURL = multicaIssueURL(workspaceURL, item.issue_key);
+    if (issueURL) {
+      const issueLink = node("a", "external", item.issue_key);
+      issueLink.href = issueURL;
+      issueLink.target = "_blank";
+      issueLink.rel = "noreferrer";
+      title.append(issueLink);
+    } else {
+      title.append(document.createTextNode(item.issue_key || "未关联"));
+    }
     const location = item.kind === "ci_failure"
       ? "CI check"
       : (item.path ? `${item.path}${item.line ? `:${item.line}` : ""}` : "review submission");
@@ -261,7 +271,7 @@ function renderReviewerReadiness(items, autoReviewEnabled) {
   }
 }
 
-function renderOutbox(items) {
+function renderOutbox(items, workspaceURL) {
   const target = byId("outbox");
   target.replaceChildren();
   const filtered = items.filter((item) => matches(item.event_key, item.kind, item.issue_key, item.status, item.last_error));
@@ -277,7 +287,18 @@ function renderOutbox(items) {
     lastError.title = item.last_error || "";
     const updated = node("td", "event-time", relativeTime(item.updated_at));
     updated.title = formatTime(item.updated_at);
-    row.append(event, node("td", "primary", item.issue_key || "—"), status, node("td", "mono", item.attempts), lastError, updated);
+    const issue = node("td");
+    const issueURL = multicaIssueURL(workspaceURL, item.issue_key);
+    if (issueURL) {
+      const issueLink = node("a", "primary external", item.issue_key);
+      issueLink.href = issueURL;
+      issueLink.target = "_blank";
+      issueLink.rel = "noreferrer";
+      issue.append(issueLink);
+    } else {
+      issue.append(node("span", "primary", item.issue_key || "—"));
+    }
+    row.append(event, issue, status, node("td", "mono", item.attempts), lastError, updated);
     target.append(row);
   }
 }
@@ -288,11 +309,11 @@ function render() {
   renderHealth(payload);
   renderMetrics(payload.data.summary);
   renderRounds(payload.data.rounds, payload.workspace_url);
-  renderFeedback(payload.data.feedback);
+  renderFeedback(payload.data.feedback, payload.workspace_url);
   renderPolls(payload.data.poll_runs);
   renderCursors(payload.data.cursors);
   renderReviewerReadiness(payload.data.reviewer_readiness || [], payload.auto_review_enabled);
-  renderOutbox(payload.data.outbox);
+  renderOutbox(payload.data.outbox, payload.workspace_url);
   const mode = payload.auto_review_enabled ? "自动 PR review 已开启" : "自动 PR review 已关闭，仅通知 review 意见";
   setText("subtitle", `${mode} · ${payload.workspace_prefix} 工单关联 · 每 ${payload.poll_interval_seconds}s 轮询`);
   setText("updated", `数据生成于 ${formatTime(payload.data.generated_at)} · 自动刷新 ${payload.refresh_interval_seconds}s`);
