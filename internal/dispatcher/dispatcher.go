@@ -41,8 +41,14 @@ type multicaClient interface {
 	ListAgents(context.Context) ([]multica.Agent, error)
 	ListRuntimes(context.Context) ([]multica.Runtime, error)
 	GetSquad(context.Context, string) (multica.Squad, error)
+	GetWorkflowRun(context.Context, string) (multica.WorkflowRun, error)
 	ListComments(context.Context, string) ([]multica.Comment, error)
-	AddComment(context.Context, string, string) error
+	AddComment(context.Context, string, string, string) error
+}
+
+type feedbackRoute struct {
+	ParentCommentID string
+	Mention         string
 }
 
 func New(cfg *config.Config, github *gh.Client, multicaClient multicaClient, reviewerClient *reviewer.Client, store *state.Store, logger *slog.Logger) *Dispatcher {
@@ -481,11 +487,23 @@ func (d *Dispatcher) queueFeedback(ctx context.Context) error {
 			_ = d.store.PermanentFeedback(ctx, item, "unsupported issue assignee type: "+issue.AssigneeType)
 			continue
 		}
-		mention := d.assigneeMention(ctx, issue, agentsByID)
-		marker, body := feedbackMessage(item, mention)
+		route, permanent, err := d.resolveFeedbackRoute(ctx, issue, item, agentsByID)
+		if err != nil {
+			if permanent {
+				_ = d.store.PermanentFeedback(ctx, item, err.Error())
+			} else {
+				_ = d.store.RetryFeedback(ctx, item, err.Error(), multica.RetryDelay(item.Attempts))
+			}
+			continue
+		}
+		marker, body := feedbackMessage(item, route.Mention)
 		outbox := state.OutboxInput{
-			EventKey: fmt.Sprintf("%s:%s:%s", item.Kind, item.Repo, item.EventID),
-			Kind:     item.Kind, IssueKey: item.IssueKey, Body: body, Marker: marker,
+			EventKey:        fmt.Sprintf("%s:%s:%s", item.Kind, item.Repo, item.EventID),
+			Kind:            item.Kind,
+			IssueKey:        item.IssueKey,
+			ParentCommentID: route.ParentCommentID,
+			Body:            body,
+			Marker:          marker,
 		}
 		if err := d.store.QueueFeedback(ctx, item, outbox); err != nil {
 			return err
@@ -545,19 +563,77 @@ func (d *Dispatcher) deliverOutbox(ctx context.Context) error {
 				break
 			}
 		}
-		if !alreadyCommented {
-			if err := d.multica.AddComment(ctx, item.IssueKey, item.Body); err != nil {
+		if alreadyCommented {
+			if err := d.store.DeliverOutbox(ctx, item.ID); err != nil {
+				deliveryErrors = append(deliveryErrors, err)
+				continue
+			}
+			d.logger.Info("outbox delivered", "event_key", item.EventKey, "kind", item.Kind,
+				"issue", item.IssueKey, "recovered_by_marker", true)
+			continue
+		}
+		issue, err := d.multica.GetIssue(ctx, item.IssueKey)
+		if err != nil {
+			_ = d.store.RetryOutbox(ctx, item.ID, err.Error(), multica.RetryDelay(item.Attempts))
+			deliveryErrors = append(deliveryErrors, fmt.Errorf("%s issue lookup: %w", item.EventKey, err))
+			continue
+		}
+		if !isActiveIssue(issue.Status) {
+			reason := "issue is no longer active: " + issue.Status
+			if err := d.store.CancelOutbox(ctx, item.ID, reason); err != nil {
+				deliveryErrors = append(deliveryErrors, err)
+				continue
+			}
+			d.logger.Info("outbox canceled", "event_key", item.EventKey, "kind", item.Kind,
+				"issue", item.IssueKey, "reason", reason)
+			continue
+		}
+		parentCommentID := item.ParentCommentID
+		if issue.WorkflowRunID != "" {
+			run, runErr := d.multica.GetWorkflowRun(ctx, issue.WorkflowRunID)
+			if runErr != nil {
+				_ = d.store.RetryOutbox(ctx, item.ID, runErr.Error(), multica.RetryDelay(item.Attempts))
+				deliveryErrors = append(deliveryErrors, fmt.Errorf("%s workflow lookup: %w", item.EventKey, runErr))
+				continue
+			}
+			reason := workflowUnavailableReason(run)
+			if reason != "" {
+				if err := d.store.CancelOutbox(ctx, item.ID, reason); err != nil {
+					deliveryErrors = append(deliveryErrors, err)
+					continue
+				}
+				d.logger.Info("outbox canceled", "event_key", item.EventKey, "kind", item.Kind,
+					"issue", item.IssueKey, "reason", reason)
+				continue
+			}
+			parentCommentID = workflowDeliveryParent(run, parentCommentID)
+			if parentCommentID == "" {
+				err := errors.New("active workflow has no comment thread")
 				_ = d.store.RetryOutbox(ctx, item.ID, err.Error(), multica.RetryDelay(item.Attempts))
 				deliveryErrors = append(deliveryErrors, fmt.Errorf("%s delivery: %w", item.EventKey, err))
 				continue
 			}
+		}
+		if err := d.multica.AddComment(ctx, item.IssueKey, parentCommentID, item.Body); err != nil {
+			if isWorkflowCommentConflict(err) {
+				if cancelErr := d.store.CancelOutbox(ctx, item.ID, err.Error()); cancelErr != nil {
+					deliveryErrors = append(deliveryErrors, cancelErr)
+					continue
+				}
+				d.logger.Warn("outbox canceled after workflow comment conflict",
+					"event_key", item.EventKey, "issue", item.IssueKey, "error", err)
+				continue
+			}
+			_ = d.store.RetryOutbox(ctx, item.ID, err.Error(), multica.RetryDelay(item.Attempts))
+			deliveryErrors = append(deliveryErrors, fmt.Errorf("%s delivery: %w", item.EventKey, err))
+			continue
 		}
 		if err := d.store.DeliverOutbox(ctx, item.ID); err != nil {
 			deliveryErrors = append(deliveryErrors, err)
 			continue
 		}
 		d.logger.Info("outbox delivered", "event_key", item.EventKey, "kind", item.Kind,
-			"issue", item.IssueKey, "recovered_by_marker", alreadyCommented)
+			"issue", item.IssueKey, "parent_comment_id", parentCommentID, "recovered_by_marker", false)
 	}
 	return errors.Join(deliveryErrors...)
 }
@@ -705,6 +781,174 @@ func reviewerReadinessSummary(items []state.ReviewerReadiness) string {
 		return "no configured reviewers"
 	}
 	return strings.Join(parts, ", ")
+}
+
+func (d *Dispatcher) resolveFeedbackRoute(ctx context.Context, issue multica.Issue, item state.PendingFeedback, agents map[string]multica.Agent) (feedbackRoute, bool, error) {
+	if issue.WorkflowRunID == "" {
+		return feedbackRoute{Mention: d.assigneeMention(ctx, issue, agents)}, false, nil
+	}
+	run, err := d.multica.GetWorkflowRun(ctx, issue.WorkflowRunID)
+	if err != nil {
+		return feedbackRoute{}, false, err
+	}
+	if reason := workflowUnavailableReason(run); reason != "" {
+		return feedbackRoute{}, true, errors.New(reason)
+	}
+	pullURL := fmt.Sprintf("https://github.com/%s/pull/%d", item.Repo, item.PullNumber)
+	parentCommentID := workflowQueueParent(run, pullURL)
+	if parentCommentID == "" {
+		return feedbackRoute{}, false, errors.New("active workflow has no comment thread")
+	}
+	return feedbackRoute{
+		ParentCommentID: parentCommentID,
+		Mention:         workflowThreadMention(run, parentCommentID, agents),
+	}, false, nil
+}
+
+type workflowTarget struct {
+	ParentCommentID string
+	AssigneeID      string
+	CreatedAt       string
+}
+
+func workflowQueueParent(run multica.WorkflowRun, pullURL string) string {
+	var matchedActive, matchedAny, active workflowTarget
+	for _, step := range run.Steps {
+		for _, attempt := range step.Attempts {
+			if attempt.ThreadRootCommentID == "" {
+				continue
+			}
+			target := workflowTarget{
+				ParentCommentID: attempt.ThreadRootCommentID,
+				AssigneeID:      attempt.AssigneeID,
+				CreatedAt:       attempt.CreatedAt,
+			}
+			isActive := step.Active && strings.TrimSpace(attempt.CompletedAt) == ""
+			if isActive {
+				active = newerWorkflowTarget(active, target)
+			}
+			if workflowOutputsContain(attempt.Outputs, pullURL) {
+				matchedAny = newerWorkflowTarget(matchedAny, target)
+				if isActive {
+					matchedActive = newerWorkflowTarget(matchedActive, target)
+				}
+			}
+		}
+	}
+	if matchedActive.ParentCommentID != "" {
+		return matchedActive.ParentCommentID
+	}
+	if matchedAny.ParentCommentID != "" && run.Collaboration.ThreadCommentID != "" {
+		return run.Collaboration.ThreadCommentID
+	}
+	if active.ParentCommentID != "" {
+		return active.ParentCommentID
+	}
+	if run.Collaboration.ThreadCommentID != "" {
+		return run.Collaboration.ThreadCommentID
+	}
+	return matchedAny.ParentCommentID
+}
+
+func workflowDeliveryParent(run multica.WorkflowRun, current string) string {
+	if current == run.Collaboration.ThreadCommentID && current != "" {
+		return current
+	}
+	var active workflowTarget
+	currentIsActive := false
+	for _, step := range run.Steps {
+		for _, attempt := range step.Attempts {
+			isActive := step.Active && strings.TrimSpace(attempt.CompletedAt) == ""
+			if !isActive || attempt.ThreadRootCommentID == "" {
+				continue
+			}
+			if attempt.ThreadRootCommentID == current {
+				currentIsActive = true
+			}
+			active = newerWorkflowTarget(active, workflowTarget{
+				ParentCommentID: attempt.ThreadRootCommentID,
+				AssigneeID:      attempt.AssigneeID,
+				CreatedAt:       attempt.CreatedAt,
+			})
+		}
+	}
+	if currentIsActive {
+		return current
+	}
+	if current != "" && run.Collaboration.ThreadCommentID != "" {
+		return run.Collaboration.ThreadCommentID
+	}
+	if active.ParentCommentID != "" {
+		return active.ParentCommentID
+	}
+	if run.Collaboration.ThreadCommentID != "" {
+		return run.Collaboration.ThreadCommentID
+	}
+	return current
+}
+
+func newerWorkflowTarget(current, candidate workflowTarget) workflowTarget {
+	if current.ParentCommentID == "" {
+		return candidate
+	}
+	currentTime, currentErr := time.Parse(time.RFC3339Nano, current.CreatedAt)
+	candidateTime, candidateErr := time.Parse(time.RFC3339Nano, candidate.CreatedAt)
+	if currentErr == nil && candidateErr == nil && candidateTime.After(currentTime) {
+		return candidate
+	}
+	if currentErr != nil || candidateErr != nil {
+		return candidate
+	}
+	return current
+}
+
+func workflowOutputsContain(outputs map[string]multica.WorkflowOutput, value string) bool {
+	for _, output := range outputs {
+		encoded, err := json.Marshal(output.Value)
+		if err == nil && strings.Contains(string(encoded), value) {
+			return true
+		}
+	}
+	return false
+}
+
+func workflowThreadMention(run multica.WorkflowRun, parentCommentID string, agents map[string]multica.Agent) string {
+	if parentCommentID == run.Collaboration.ThreadCommentID &&
+		run.Collaboration.Leader.ID != "" && strings.TrimSpace(run.Collaboration.Leader.Name) != "" {
+		return fmt.Sprintf("[@%s](mention://agent/%s)", run.Collaboration.Leader.Name, run.Collaboration.Leader.ID)
+	}
+	for _, step := range run.Steps {
+		for _, attempt := range step.Attempts {
+			if attempt.ThreadRootCommentID != parentCommentID {
+				continue
+			}
+			if agent, ok := agents[attempt.AssigneeID]; ok && strings.TrimSpace(agent.Name) != "" {
+				return fmt.Sprintf("[@%s](mention://agent/%s)", agent.Name, attempt.AssigneeID)
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
+func workflowUnavailableReason(run multica.WorkflowRun) string {
+	status := strings.ToLower(strings.TrimSpace(run.Status))
+	switch status {
+	case "done", "completed", "failed", "canceled", "cancelled":
+		return "workflow is not active: " + status
+	case "":
+		return "workflow status is unavailable"
+	}
+	if !run.DiscussionCommentsSupported {
+		return "workflow does not support discussion comments"
+	}
+	return ""
+}
+
+func isWorkflowCommentConflict(err error) bool {
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "workflow issue must reply") ||
+		strings.Contains(message, "comments on a workflow issue must reply")
 }
 
 func (d *Dispatcher) assigneeMention(ctx context.Context, issue multica.Issue, agents map[string]multica.Agent) string {

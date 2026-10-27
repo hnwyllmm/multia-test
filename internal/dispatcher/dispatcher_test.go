@@ -24,8 +24,11 @@ type fakeMulticaClient struct {
 	agents        []multica.Agent
 	runtimes      []multica.Runtime
 	issue         *multica.Issue
+	workflowRun   *multica.WorkflowRun
 	comments      []multica.Comment
 	addedComments []string
+	addedParents  []string
+	addCommentErr error
 }
 
 func (f *fakeMulticaClient) GetIssue(context.Context, string) (multica.Issue, error) {
@@ -47,12 +50,20 @@ func (f *fakeMulticaClient) GetSquad(context.Context, string) (multica.Squad, er
 	return multica.Squad{}, errors.New("not implemented")
 }
 
+func (f *fakeMulticaClient) GetWorkflowRun(context.Context, string) (multica.WorkflowRun, error) {
+	if f.workflowRun != nil {
+		return *f.workflowRun, nil
+	}
+	return multica.WorkflowRun{}, errors.New("workflow run not found")
+}
+
 func (f *fakeMulticaClient) ListComments(context.Context, string) ([]multica.Comment, error) {
 	return f.comments, nil
 }
-func (f *fakeMulticaClient) AddComment(_ context.Context, _ string, body string) error {
+func (f *fakeMulticaClient) AddComment(_ context.Context, _, parentID, body string) error {
 	f.addedComments = append(f.addedComments, body)
-	return nil
+	f.addedParents = append(f.addedParents, parentID)
+	return f.addCommentErr
 }
 
 func TestIssueKeyFromPull(t *testing.T) {
@@ -252,6 +263,81 @@ func TestAssigneeMentionUsesVisibleAgentName(t *testing.T) {
 	}, map[string]multica.Agent{"agent-id": {ID: "agent-id", Name: "Worker"}})
 	if mention != "[@Worker](mention://agent/agent-id)" {
 		t.Fatalf("unexpected visible-agent mention %q", mention)
+	}
+}
+
+func TestWorkflowFeedbackRoutesToActivePRAttempt(t *testing.T) {
+	run := multica.WorkflowRun{
+		Status: "running", DiscussionCommentsSupported: true,
+		Collaboration: multica.WorkflowCollaboration{
+			ThreadCommentID: "collaboration-root",
+			Leader:          multica.WorkflowLeader{ID: "leader", Name: "Leader"},
+		},
+		Steps: []multica.WorkflowStep{{
+			Key: "fix", Active: true,
+			Attempts: []multica.WorkflowAttempt{{
+				ID: "attempt", AssigneeID: "worker", ThreadRootCommentID: "attempt-root",
+				CreatedAt: "2026-10-11T10:00:00+08:00",
+				Outputs: map[string]multica.WorkflowOutput{
+					"pr_urls": {Value: "https://github.com/owner/repo/pull/9"},
+				},
+			}},
+		}},
+	}
+	client := &fakeMulticaClient{workflowRun: &run}
+	dispatcher := &Dispatcher{multica: client, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	route, permanent, err := dispatcher.resolveFeedbackRoute(context.Background(), multica.Issue{
+		Identifier: "SEEK-9", WorkflowRunID: "workflow-run",
+	}, state.PendingFeedback{Repo: "owner/repo", PullNumber: 9}, map[string]multica.Agent{
+		"worker": {ID: "worker", Name: "Worker"},
+	})
+	if err != nil || permanent || route.ParentCommentID != "attempt-root" ||
+		route.Mention != "[@Worker](mention://agent/worker)" {
+		t.Fatalf("route=%+v permanent=%v err=%v", route, permanent, err)
+	}
+}
+
+func TestWorkflowFeedbackUsesCollaborationAfterPRAttemptCompletes(t *testing.T) {
+	run := multica.WorkflowRun{
+		Status: "running", DiscussionCommentsSupported: true,
+		Collaboration: multica.WorkflowCollaboration{
+			ThreadCommentID: "collaboration-root",
+			Leader:          multica.WorkflowLeader{ID: "leader", Name: "Leader"},
+		},
+		Steps: []multica.WorkflowStep{{
+			Key: "fix", Active: false,
+			Attempts: []multica.WorkflowAttempt{{
+				AssigneeID: "worker", ThreadRootCommentID: "completed-root",
+				CreatedAt: "2026-10-11T10:00:00+08:00", CompletedAt: "2026-10-11T10:04:00+08:00",
+				Outputs: map[string]multica.WorkflowOutput{
+					"pr_urls": {Value: "https://github.com/owner/repo/pull/9"},
+				},
+			}},
+		}},
+	}
+	client := &fakeMulticaClient{workflowRun: &run}
+	dispatcher := &Dispatcher{multica: client, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	route, permanent, err := dispatcher.resolveFeedbackRoute(context.Background(), multica.Issue{
+		Identifier: "SEEK-9", WorkflowRunID: "workflow-run",
+	}, state.PendingFeedback{Repo: "owner/repo", PullNumber: 9}, nil)
+	if err != nil || permanent || route.ParentCommentID != "collaboration-root" ||
+		route.Mention != "[@Leader](mention://agent/leader)" {
+		t.Fatalf("route=%+v permanent=%v err=%v", route, permanent, err)
+	}
+	if got := workflowDeliveryParent(run, "completed-root"); got != "collaboration-root" {
+		t.Fatalf("delivery parent=%q, want collaboration-root", got)
+	}
+}
+
+func TestDoneWorkflowRouteIsPermanent(t *testing.T) {
+	run := multica.WorkflowRun{Status: "done", DiscussionCommentsSupported: true}
+	client := &fakeMulticaClient{workflowRun: &run}
+	dispatcher := &Dispatcher{multica: client, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	_, permanent, err := dispatcher.resolveFeedbackRoute(context.Background(), multica.Issue{
+		Identifier: "SEEK-9", WorkflowRunID: "workflow-run",
+	}, state.PendingFeedback{Repo: "owner/repo", PullNumber: 9}, nil)
+	if err == nil || !permanent || !strings.Contains(err.Error(), "not active") {
+		t.Fatalf("permanent=%v err=%v", permanent, err)
 	}
 }
 
@@ -530,6 +616,121 @@ func TestFeedbackDeliveryRecoversFromExistingComment(t *testing.T) {
 	}
 	status, err := store.Status(ctx)
 	if err != nil || status.Outbox["delivered"] != 1 {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+}
+
+func TestWorkflowFeedbackDeliveryUsesAttemptParent(t *testing.T) {
+	store, err := state.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	input := state.FeedbackInput{
+		Repo: "owner/repo", EventID: 79, PullNumber: 9, IssueKey: "SEEK-9",
+		Body: "finding", Metadata: map[string]any{}, OccurredAt: time.Now(),
+	}
+	if _, err := store.IngestReviews(ctx, []state.FeedbackInput{input}); err != nil {
+		t.Fatal(err)
+	}
+	pending, _ := store.PendingFeedback(ctx, 10)
+	if err := store.QueueFeedback(ctx, pending[0], state.OutboxInput{
+		EventKey: "review:owner/repo:79", Kind: "review", IssueKey: "SEEK-9",
+		ParentCommentID: "attempt-root", Body: "review feedback", Marker: "marker",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	run := multica.WorkflowRun{
+		Status: "running", DiscussionCommentsSupported: true,
+		Collaboration: multica.WorkflowCollaboration{ThreadCommentID: "collaboration-root"},
+		Steps: []multica.WorkflowStep{{Active: true, Attempts: []multica.WorkflowAttempt{{
+			ThreadRootCommentID: "attempt-root", CreatedAt: time.Now().Format(time.RFC3339),
+		}}}},
+	}
+	client := &fakeMulticaClient{
+		issue:       &multica.Issue{Identifier: "SEEK-9", Status: "in_progress", WorkflowRunID: "workflow-run"},
+		workflowRun: &run,
+	}
+	worker := New(&config.Config{}, nil, client, nil, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := worker.deliverOutbox(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.addedParents) != 1 || client.addedParents[0] != "attempt-root" {
+		t.Fatalf("comment parents=%v", client.addedParents)
+	}
+	status, err := store.Status(ctx)
+	if err != nil || status.Outbox["delivered"] != 1 {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+}
+
+func TestFeedbackDeliveryCancelsInactiveIssue(t *testing.T) {
+	store, err := state.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	input := state.FeedbackInput{
+		Repo: "owner/repo", EventID: 80, PullNumber: 9, IssueKey: "SEEK-9",
+		Body: "finding", Metadata: map[string]any{}, OccurredAt: time.Now(),
+	}
+	if _, err := store.IngestReviews(ctx, []state.FeedbackInput{input}); err != nil {
+		t.Fatal(err)
+	}
+	pending, _ := store.PendingFeedback(ctx, 10)
+	if err := store.QueueFeedback(ctx, pending[0], state.OutboxInput{
+		EventKey: "review:owner/repo:80", Kind: "review", IssueKey: "SEEK-9",
+		Body: "review feedback", Marker: "marker",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeMulticaClient{issue: &multica.Issue{Identifier: "SEEK-9", Status: "done"}}
+	worker := New(&config.Config{}, nil, client, nil, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := worker.deliverOutbox(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.addedComments) != 0 {
+		t.Fatalf("unexpected comments=%d", len(client.addedComments))
+	}
+	status, err := store.Status(ctx)
+	if err != nil || status.Outbox["canceled"] != 1 || status.Outbox["pending"] != 0 {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+}
+
+func TestWorkflowCommentConflictIsNotRetried(t *testing.T) {
+	store, err := state.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	input := state.FeedbackInput{
+		Repo: "owner/repo", EventID: 81, PullNumber: 9, IssueKey: "SEEK-9",
+		Body: "finding", Metadata: map[string]any{}, OccurredAt: time.Now(),
+	}
+	if _, err := store.IngestReviews(ctx, []state.FeedbackInput{input}); err != nil {
+		t.Fatal(err)
+	}
+	pending, _ := store.PendingFeedback(ctx, 10)
+	if err := store.QueueFeedback(ctx, pending[0], state.OutboxInput{
+		EventKey: "review:owner/repo:81", Kind: "review", IssueKey: "SEEK-9",
+		Body: "review feedback", Marker: "marker",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeMulticaClient{
+		issue:         &multica.Issue{Identifier: "SEEK-9", Status: "in_progress"},
+		addCommentErr: errors.New("comments on a Workflow issue must reply to a Workflow collaboration or Step Attempt thread"),
+	}
+	worker := New(&config.Config{}, nil, client, nil, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := worker.deliverOutbox(ctx); err != nil {
+		t.Fatal(err)
+	}
+	status, err := store.Status(ctx)
+	if err != nil || status.Outbox["canceled"] != 1 || status.Outbox["pending"] != 0 {
 		t.Fatalf("status=%+v err=%v", status, err)
 	}
 }

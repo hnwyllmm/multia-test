@@ -2,10 +2,54 @@ package state
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestMigrateAddsWorkflowParentColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE outbox (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		event_key TEXT NOT NULL UNIQUE,
+		kind TEXT NOT NULL,
+		issue_key TEXT NOT NULL,
+		body TEXT NOT NULL,
+		marker TEXT NOT NULL,
+		status TEXT NOT NULL,
+		attempts INTEGER NOT NULL DEFAULT 0,
+		next_attempt_at TEXT,
+		last_error TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`INSERT INTO outbox
+		(event_key, kind, issue_key, body, marker, status, created_at, updated_at)
+		VALUES ('event', 'review', 'SEEK-1', 'body', 'marker', 'pending', '2026-10-27T00:00:00Z', '2026-10-27T00:00:00Z')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	items, err := store.DueOutbox(context.Background(), 10)
+	if err != nil || len(items) != 1 || items[0].ParentCommentID != "" {
+		t.Fatalf("items=%+v err=%v", items, err)
+	}
+}
 
 func TestRoundAndOutboxAreIdempotent(t *testing.T) {
 	store, err := OpenMemory()
@@ -152,7 +196,10 @@ func TestQueueFeedbackIsTransactional(t *testing.T) {
 		t.Fatal(err)
 	}
 	pending, _ := store.PendingFeedback(context.Background(), 10)
-	if err := store.QueueFeedback(context.Background(), pending[0], OutboxInput{EventKey: "review:key", Kind: "review", IssueKey: "WANG-2", Body: "comment", Marker: "marker"}); err != nil {
+	if err := store.QueueFeedback(context.Background(), pending[0], OutboxInput{
+		EventKey: "review:key", Kind: "review", IssueKey: "WANG-2",
+		ParentCommentID: "thread-root", Body: "comment", Marker: "marker",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	pending, _ = store.PendingFeedback(context.Background(), 10)
@@ -160,8 +207,39 @@ func TestQueueFeedbackIsTransactional(t *testing.T) {
 		t.Fatalf("feedback remained pending: %+v", pending)
 	}
 	outbox, _ := store.DueOutbox(context.Background(), 10)
-	if len(outbox) != 1 {
-		t.Fatalf("outbox size=%d", len(outbox))
+	if len(outbox) != 1 || outbox[0].ParentCommentID != "thread-root" {
+		t.Fatalf("outbox=%+v", outbox)
+	}
+}
+
+func TestCancelOutboxStopsRetries(t *testing.T) {
+	store, err := OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	input := FeedbackInput{Repo: "owner/repo", EventID: 10, PullNumber: 2, IssueKey: "WANG-2", OccurredAt: time.Now()}
+	if _, err := store.IngestReviews(ctx, []FeedbackInput{input}); err != nil {
+		t.Fatal(err)
+	}
+	pending, _ := store.PendingFeedback(ctx, 10)
+	if err := store.QueueFeedback(ctx, pending[0], OutboxInput{
+		EventKey: "review:cancel", Kind: "review", IssueKey: "WANG-2", Body: "comment", Marker: "marker",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	outbox, _ := store.DueOutbox(ctx, 10)
+	if err := store.CancelOutbox(ctx, outbox[0].ID, "issue is done"); err != nil {
+		t.Fatal(err)
+	}
+	due, err := store.DueOutbox(ctx, 10)
+	if err != nil || len(due) != 0 {
+		t.Fatalf("due=%+v err=%v", due, err)
+	}
+	status, err := store.Status(ctx)
+	if err != nil || status.Outbox["canceled"] != 1 {
+		t.Fatalf("status=%+v err=%v", status, err)
 	}
 }
 

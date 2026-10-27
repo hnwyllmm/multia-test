@@ -22,14 +22,15 @@ type Client struct {
 }
 
 type Issue struct {
-	ID           string         `json:"id"`
-	Identifier   string         `json:"identifier"`
-	Title        string         `json:"title"`
-	Description  string         `json:"description"`
-	Status       string         `json:"status"`
-	AssigneeID   string         `json:"assignee_id"`
-	AssigneeType string         `json:"assignee_type"`
-	Raw          map[string]any `json:"-"`
+	ID            string         `json:"id"`
+	Identifier    string         `json:"identifier"`
+	Title         string         `json:"title"`
+	Description   string         `json:"description"`
+	Status        string         `json:"status"`
+	AssigneeID    string         `json:"assignee_id"`
+	AssigneeType  string         `json:"assignee_type"`
+	WorkflowRunID string         `json:"workflow_run_id"`
+	Raw           map[string]any `json:"-"`
 }
 
 type Agent struct {
@@ -66,6 +67,44 @@ type Comment struct {
 	CreatedAt string `json:"created_at"`
 }
 
+type WorkflowRun struct {
+	ID                          string                `json:"id"`
+	Status                      string                `json:"status"`
+	DiscussionCommentsSupported bool                  `json:"discussion_comments_supported"`
+	Collaboration               WorkflowCollaboration `json:"collaboration"`
+	Steps                       []WorkflowStep        `json:"steps"`
+}
+
+type WorkflowCollaboration struct {
+	ThreadCommentID string         `json:"thread_comment_id"`
+	Leader          WorkflowLeader `json:"leader"`
+}
+
+type WorkflowLeader struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type WorkflowStep struct {
+	Key      string            `json:"key"`
+	Active   bool              `json:"active"`
+	Status   string            `json:"status"`
+	Attempts []WorkflowAttempt `json:"attempts"`
+}
+
+type WorkflowAttempt struct {
+	ID                  string                    `json:"id"`
+	AssigneeID          string                    `json:"assignee_id"`
+	ThreadRootCommentID string                    `json:"thread_root_comment_id"`
+	CreatedAt           string                    `json:"created_at"`
+	CompletedAt         string                    `json:"completed_at"`
+	Outputs             map[string]WorkflowOutput `json:"outputs"`
+}
+
+type WorkflowOutput struct {
+	Value any `json:"value"`
+}
+
 func New(cfg config.MulticaConfig) (*Client, error) {
 	serverURL := os.Getenv(cfg.ServerURLEnv)
 	if serverURL == "" {
@@ -99,8 +138,17 @@ func (c *Client) GetIssue(ctx context.Context, identifier string) (Issue, error)
 		ID: stringValue(raw, "id"), Identifier: stringValue(raw, "identifier"),
 		Title: stringValue(raw, "title"), Description: stringValue(raw, "description"),
 		Status: stringValue(raw, "status"), AssigneeID: stringValue(raw, "assignee_id"),
-		AssigneeType: stringValue(raw, "assignee_type"), Raw: raw,
+		AssigneeType:  stringValue(raw, "assignee_type"),
+		WorkflowRunID: stringValue(raw, "workflow_run_id"), Raw: raw,
 	}, nil
+}
+
+func (c *Client) GetWorkflowRun(ctx context.Context, runID string) (WorkflowRun, error) {
+	var result WorkflowRun
+	if err := c.runJSON(ctx, nil, &result, "workflow", "run", "get", runID, "--output", "json"); err != nil {
+		return WorkflowRun{}, fmt.Errorf("get workflow run %s: %w", runID, err)
+	}
+	return result, nil
 }
 
 func (c *Client) ListAgents(ctx context.Context) ([]Agent, error) {
@@ -190,10 +238,14 @@ func (c *Client) ListComments(ctx context.Context, issueID string) ([]Comment, e
 	return result, nil
 }
 
-func (c *Client) AddComment(ctx context.Context, issueID, content string) error {
+func (c *Client) AddComment(ctx context.Context, issueID, parentID, content string) error {
+	args := []string{"issue", "comment", "add", issueID}
+	if strings.TrimSpace(parentID) != "" {
+		args = append(args, "--parent", parentID)
+	}
+	args = append(args, "--content-stdin", "--output", "json")
 	var response json.RawMessage
-	if err := c.runJSON(ctx, strings.NewReader(content), &response,
-		"issue", "comment", "add", issueID, "--content-stdin", "--output", "json"); err != nil {
+	if err := c.runJSON(ctx, strings.NewReader(content), &response, args...); err != nil {
 		return fmt.Errorf("add issue comment: %w", err)
 	}
 	return nil

@@ -108,6 +108,34 @@ func TestClientListsRuntimeStatus(t *testing.T) {
 	}
 }
 
+func TestClientReadsWorkflowAndAddsThreadReply(t *testing.T) {
+	cli := fakeCLI(t)
+	t.Setenv("TEST_MULTICA_SERVER", "https://multica.example")
+	t.Setenv("TEST_MULTICA_TOKEN", "valid")
+	t.Setenv("EXPECTED_MULTICA_TOKEN", "valid")
+	t.Setenv("EXPECTED_COMMENT_PARENT", "thread-root")
+	t.Setenv("EXPECTED_COMMENT_BODY", "feedback")
+	client, err := New(config.MulticaConfig{
+		CLIPath: cli, ServerURLEnv: "TEST_MULTICA_SERVER", WorkspaceID: "workspace",
+		Auth: config.SecretRef{Type: "env", Name: "TEST_MULTICA_TOKEN"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	issue, err := client.GetIssue(context.Background(), "SEEK-9")
+	if err != nil || issue.WorkflowRunID != "workflow-run" {
+		t.Fatalf("issue=%+v err=%v", issue, err)
+	}
+	run, err := client.GetWorkflowRun(context.Background(), issue.WorkflowRunID)
+	if err != nil || run.Status != "running" || len(run.Steps) != 1 ||
+		run.Steps[0].Attempts[0].ThreadRootCommentID != "thread-root" {
+		t.Fatalf("run=%+v err=%v", run, err)
+	}
+	if err := client.AddComment(context.Background(), issue.Identifier, "thread-root", "feedback"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func fakeCLI(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "multica")
@@ -126,6 +154,23 @@ if [ "$MULTICA_SERVER_URL" != "https://multica.example" ] || [ "$MULTICA_WORKSPA
 fi
 if [ "$1" = "runtime" ] && [ "$2" = "list" ]; then
   printf '[{"id":"runtime","name":"Codex","status":"online","last_seen_at":"2026-10-08T10:00:00+08:00"}]\n'
+  exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "get" ]; then
+  printf '{"id":"issue","identifier":"SEEK-9","status":"in_progress","workflow_run_id":"workflow-run"}\n'
+  exit 0
+fi
+if [ "$1" = "workflow" ] && [ "$2" = "run" ] && [ "$3" = "get" ]; then
+  printf '{"id":"workflow-run","status":"running","discussion_comments_supported":true,"steps":[{"key":"work","active":true,"attempts":[{"id":"attempt","assignee_id":"agent","thread_root_comment_id":"thread-root","outputs":{}}]}]}\n'
+  exit 0
+fi
+if [ "$1" = "issue" ] && [ "$2" = "comment" ] && [ "$3" = "add" ]; then
+  body=$(cat)
+  if [ "$5" != "--parent" ] || [ "$6" != "$EXPECTED_COMMENT_PARENT" ] || [ "$body" != "$EXPECTED_COMMENT_BODY" ]; then
+    echo "wrong comment route" >&2
+    exit 44
+  fi
+  printf '{"id":"comment"}\n'
   exit 0
 fi
 printf '{"id":"workspace"}\n'
